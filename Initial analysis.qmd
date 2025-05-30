@@ -14,6 +14,7 @@ knitr::opts_chunk$set(echo = F, warning = F, message = F)
 library(tidyverse)
 library(survival)
 library(survminer)
+library(lubridate)
 ```
 
 
@@ -30,28 +31,68 @@ Main things to compare among treatments, excluding spatial behaviour after relea
 • ...
 
 
-```{r load data}
-x <- read.csv("input/Combined feral pig data_SD_20250328 AB.csv", header = T) %>%
-  janitor::clean_names()%>%
-  mutate(date = as.POSIXct(date, format = "%d/%m/%Y %H:%M:%S"),
+```{r load and tidy data}
+x <- read.csv("input/working_pig_data_2025-05-30.csv", header = T) %>%
+  janitor::clean_names() %>%
+  mutate(date = as.Date(date, format="%d/%m/%Y", tz="Australia/Brisbane"),
+         time_of_restraint = as.POSIXct(time_of_restraint, format="%d/%m/%Y %H:%M:%S"),
+         time_of_restraint = ymd_hms(time_of_restraint, tz="Australia/Brisbane"),
+         time_of_release = as.POSIXct(time_of_release, format="%d/%m/%Y %H:%M:%S"),
+         time_of_release = ymd_hms(time_of_release, tz="Australia/Brisbane"),
+         time_standing = as.POSIXct(time_standing, format="%d/%m/%Y %H:%M"),
+         time_standing = ymd_hms(time_standing, tz="Australia/Brisbane"),
+         reversal_time_min = as.numeric(reversal_time_min),
+         dose_yohimbine_mg = as.numeric(dose_yohimbine_mg),
+         handling_duration_min = as.numeric(handling_duration_min),
+         dose_atipamezole_mg = as.numeric(dose_atipamezole_mg),
+         handling_sec = time_of_release - time_of_restraint, # For Pole and Manual only
+         recovery_sec = time_standing - time_of_release, # For Pole only
+         induction_sec = as.numeric(induction_min) * 60,
+         total_sec = NA,
          ambient_temp = as.numeric(ambient_temp),
          temp_body = as.numeric(temp_body),
          hyperthermic = 0) 
 
-x$dose_yohimbine_mg[which(x$dose_yohimbine_mg == "-")] <- ""
-x$dose_atipamezole_mg[which(x$dose_atipamezole_mg == "-")] <- ""
+# Some pole pigs have -ve recovery time because time_standing has no seconds
+# here, time_standing = time_release, so recovery = 0
+x$recovery_sec[which(x$recovery_sec < 0)] <- 0
 
+# Handling time for darted pigs = handling_duration_min * 60 seconds
+x$handling_sec[which(x$capture_method == "Darting")] <- 
+  x$handling_duration_min[which(x$capture_method == "Darting")] * 60 
+
+# Recovery time for darted pigs = reversal duration
+# (Pole pigs were calculated above as time standing - time release)
+x$recovery_sec[which(x$capture_method == "Darting")] <- 
+  x$reversal_time_min[which(x$capture_method == "Darting")] * 60 # use minutes() instead?
+
+# Total time for pole and dart pigs = induction_min + handling_sec + recovery_sec
+x$total_sec[which(x$capture_method != "Manual")] <- 
+  x$handling_sec[which(x$capture_method != "Manual")] +
+  x$recovery_sec[which(x$capture_method != "Manual")] +
+  x$induction_sec[which(x$capture_method != "Manual")] 
+
+x$total_sec[which(x$capture_method == "Manual")] <- 
+  x$handling_sec[which(x$capture_method == "Manual")]
+
+# Pigs with body temp >= 40 are classed as hyperthermic
 x$hyperthermic[which(x$temp_body >=40)] <- 1
-x$date[which(x$date == "2023-09-21 00:00:00 AEST")] <- "2023-09-21 06:10:00 AEST"
 
-x$handling_duration_min <- as.numeric(x$handling_duration_min)
-x$total_duration_min <- as.numeric(x$total_duration_min)
+# Adjust a misreported date time
+x$date[which(x$date == "2023-09-21 00:00:00 AEST")] <- "2023-09-21 06:10:00 AEST"
 
 x$capture_method <- factor(x$capture_method, levels = c("Manual", "Pole syringe", "Darting"))
 
 x <- x %>%
-  select(-name, -state, -x, -notes_on_collar_recovery, -fate, -collar_data, 
-         -collar_in_hand, -collar_end_date, -tags_in_trap, -last_usable_fix)
+  mutate(start = 0,
+         handling_min = round(as.numeric(handling_sec / 60), 2),
+         recovery_min = round(as.numeric(recovery_sec / 60), 2),
+         total_min = round(as.numeric(total_sec / 60), 2)) %>%
+  dplyr::select(date, id, capture_method, sex, ambient_temp, temp_body, hyperthermic, 
+                start, induction_min, handling_min, recovery_min, total_min,
+                drug_s, dose_yohimbine_mg, dose_atipamezole_mg) 
+
+
 ```
 
 
@@ -66,6 +107,9 @@ Also, capture method and drugs are confounded
 -   119 dart captures with zoletil and xylazine (59 atipamezole, 31 yohimbine, 29 without reversal?)
 
 
+![Flow chart showing timed components for each method](background/capture_process.png)  
+
+
 **Q1 Do time to event profiles (survival curves) differ among treatments?**
 
 *Expectation 1.1: Pigs subjected to manual restraint had shorter handling and total time than pigs immobilised with pole syringe or dart.*
@@ -75,7 +119,7 @@ Handling time \~ capture method (manual, pole, dart)
 
 ```{r handling time by capture method, include = F}
 # survival formula
-surv.ht <- Surv(time = x$handling_duration_min, event = rep(1, nrow(x)))
+surv.ht <- Surv(time = x$handling_min, event = rep(1, nrow(x)))
 
 # KM survival model
 ht1 <- survfit(surv.ht ~ capture_method, data=x)
@@ -111,20 +155,27 @@ ggplot(ht1.median) +
 
 ```
 
-Total time \~ capture method
+Total time \~ capture method  
+
+    
 
 ```{r total time, include = F}
 # survival formula
-surv.tt <- Surv(time = x$total_duration_min, event = rep(1, nrow(x)))
+surv.tt <- Surv(time = x$total_min, event = rep(1, nrow(x)))
 
 # KM survival model
 tt1 <- survfit(surv.tt ~ capture_method, data=x)
 tt1
 
 surv_median(tt1)
+
+# Greatest total time
+max.recovery <- as.numeric(x$recovery_min[which(x$total_min == max(x$total_min, na.rm = T))])
 ```
 
 Total time was also shorter for pigs subjected to manual handling (median total time = `r surv_median(tt1)[1,2]` mins, n = `r tt1$n[1]`) than for pigs subjected to pole syringe (median total time = `r surv_median(tt1)[2,2]` mins, n = `r tt1$n[2]`), which was shorter than pigs subjected to darting (median total time = `r surv_median(tt1)[3,2]` mins, n = `r tt1$n[3]`). 
+
+There's a big statistical outlier in the darted pigs due to one pig with a recovery duration of `r max.recovery` minutes.  
 
 ```{r plot capture method TT}
 ggsurvplot(tt1, data=x, conf.int = T, 
@@ -158,12 +209,11 @@ Maybe:
 
 Recovery time \~ drug combination (zol, zol xyl, zol xyl + yohimbine, zol xyl + atipamezole?)  
 
-Currently, we only have `recovery time` for pole syringe captures and `reversal time` for dart captures. Are these the same thing?  
-
 Anyway, looking at total time for now...
 
 Total time \~ drug combination (zol, zol xyl, zol xyl + yohimbine, zol xyl + atipamezole?)  
 
+Only four pigs got zoletil and xylazine with no reversal. Presumably, they were in a hurry to get away and didn't feel the need for reversal. I think we should exclude these because they don't add any useful information, only noise.  
 
 ```{r model drug combo tt, include = F}
 xd <- x %>% 
@@ -178,21 +228,24 @@ xd$combo[which(xd$dose_yohimbine_mg != "")] <- paste0(xd$combo[which(xd$dose_yoh
 xd$combo[which(xd$dose_atipamezole_mg != "")] <- paste0(xd$combo[which(xd$dose_atipamezole_mg != "")], "+A")
 table(xd$combo)
 
+xd <- xd %>%
+  filter(xd$combo != "ZX")
+
 # survival formula
-surv.tt.drug <- Surv(time = xd$total_duration_min, event = rep(1, nrow(xd)))
+surv.tt.drug <- Surv(time = xd$total_min, event = rep(1, nrow(xd)))
 
 # KM survival model
 tt.drug1 <- survfit(surv.tt.drug ~ combo, data=xd)
 tt.drug1
 ``` 
 
-I'm not sure if this is a valid or useful comparison (Jordan?), but pigs treated only with zoletil had shorter total times (median total time = `r surv_median(tt.drug1)[1,2]` mins, n = `r tt.drug1$n[1]`) than pigs treated with zoletil and xylazine. There was no clear difference among the latter group, though there was a tendency for pigs that were not treated with a reversal drug to have shorter total times (median total time = `r surv_median(tt.drug1)[2,2]` mins, n = `r tt.drug1$n[2]`) than those administered atipamezole (median total time = `r surv_median(tt.drug1)[3,2]` mins, n = `r tt.drug1$n[3]`) or yohimbine (median total time = `r surv_median(tt.drug1)[4,2]` mins, n = `r tt.drug1$n[4]`). 
+I'm not sure if this is a valid or useful comparison (Jordan?), but pigs given only zoletil had shorter total times (median total time = `r surv_median(tt.drug1)[1,2]` mins, n = `r tt.drug1$n[1]`) than pigs given zoletil and xylazine. There was no clear difference among the latter group, though there was a tendency for pigs that were not treated with a reversal drug to have shorter total times (median total time = `r surv_median(tt.drug1)[2,2]` mins, n = `r tt.drug1$n[2]`) than those administered atipamezole (median total time = `r surv_median(tt.drug1)[3,2]` mins, n = `r tt.drug1$n[3]`) or yohimbine (median total time = `r surv_median(tt.drug1)[4,2]` mins, n = `r tt.drug1$n[4]`). 
 
 ```{r plot drug combo tt}
 ggsurvplot(tt.drug1, data=xd, conf.int = T, 
            palette = "jama",
            legend = "bottom", legend.title = "Drug regime",
-           legend.labs = c("Z", "Z+X", "Z+X, A", "Z+X, Y"),
+           legend.labs = c("Z", "ZX + A", "ZX + Y"),
            ggtheme = theme_survminer(font.caption = c(10, "plain", "black")))  +
   xlab("Time (mins)") +
   ylab("Proportion of pigs") +
@@ -210,7 +263,7 @@ ggplot(tt.drug1.median) +
 
 ```
 
-Again, the zoletil only treatment is perfectly confounded with pole syringe administration and all darted pigs received xylazine.  
+Again, the zoletil only treatment is perfectly confounded with pole syringe administration and all darted pigs received xylazine except for the four in a hurry.  
 
 ```{r drug confounding}
 xd %>% group_by(combo, capture_method) %>%
