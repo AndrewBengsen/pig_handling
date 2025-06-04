@@ -90,13 +90,14 @@ x <- x %>%
          total_min = round(as.numeric(total_sec / 60), 2)) %>%
   dplyr::select(date, id, capture_method, sex, ambient_temp, temp_body, hyperthermic, 
                 start, induction_min, handling_min, recovery_min, total_min,
-                drug_s, dose_yohimbine_mg, dose_atipamezole_mg) 
+                drug_s, dose_yohimbine_mg, dose_atipamezole_mg, total_duration_min) 
 
-
+# Take a different total min (as recorded in the spreadsheet provided) for those pigs with incomplete data
+x$total_min[which(is.na(x$total_min))] <- x$total_duration_min
 ```
 
 
-The range of questions we can answer is limited by the lack of standardised measurements, e.g. no mass for manually restrained pigs.
+The range of questions we can answer is limited by the lack of standardised measurements, e.g. no mass for manually restrained pigs. 
 
 Also, capture method and drugs are confounded
 
@@ -106,9 +107,11 @@ Also, capture method and drugs are confounded
 
 -   119 dart captures with zoletil and xylazine (59 atipamezole, 31 yohimbine, 29 without reversal?)
 
+And lots of data are missing, e.g. handling times for most pigs given zoletil and xylazine without reversal.  
+
+{{< pagebreak >}}
 
 ![Flow chart showing timed components for each method](background/capture_process.png)  
-
 
 **Q1 Do time to event profiles (survival curves) differ among treatments?**
 
@@ -173,9 +176,9 @@ surv_median(tt1)
 max.recovery <- as.numeric(x$recovery_min[which(x$total_min == max(x$total_min, na.rm = T))])
 ```
 
-Total time was also shorter for pigs subjected to manual handling (median total time = `r surv_median(tt1)[1,2]` mins, n = `r tt1$n[1]`) than for pigs subjected to pole syringe (median total time = `r surv_median(tt1)[2,2]` mins, n = `r tt1$n[2]`), which was shorter than pigs subjected to darting (median total time = `r surv_median(tt1)[3,2]` mins, n = `r tt1$n[3]`). 
+Total time was also shorter for pigs subjected to manual handling (median total time = `r surv_median(tt1)[1,2]` mins, n = `r tt1$n[1]`) than for pigs subjected to pole syringe (median total time = `r surv_median(tt1)[2,2]` mins, n = `r tt1$n[2]`), which was similar to pigs subjected to darting (median total time = `r surv_median(tt1)[3,2]` mins, n = `r tt1$n[3]`). 
 
-There's a big statistical outlier in the darted pigs due to one pig with a recovery duration of `r max.recovery` minutes.  
+There's a big statistical outlier in the darted pigs due to one pig with a recovery duration of `r max.recovery` minutes, but this doesn't really impact the median.  
 
 ```{r plot capture method TT}
 ggsurvplot(tt1, data=x, conf.int = T, 
@@ -199,7 +202,6 @@ ggplot(tt1.median) +
   theme_classic()
 ```
 
-{{< pagebreak >}}
 
 *Expectation 1.2: Pigs subjected to different chemical treatments had different handling and total time.*
 
@@ -213,7 +215,6 @@ Anyway, looking at total time for now...
 
 Total time \~ drug combination (zol, zol xyl, zol xyl + yohimbine, zol xyl + atipamezole?)  
 
-Only four pigs got zoletil and xylazine with no reversal. Presumably, they were in a hurry to get away and didn't feel the need for reversal. I think we should exclude these because they don't add any useful information, only noise.  
 
 ```{r model drug combo tt, include = F}
 xd <- x %>% 
@@ -228,8 +229,11 @@ xd$combo[which(xd$dose_yohimbine_mg != "")] <- paste0(xd$combo[which(xd$dose_yoh
 xd$combo[which(xd$dose_atipamezole_mg != "")] <- paste0(xd$combo[which(xd$dose_atipamezole_mg != "")], "+A")
 table(xd$combo)
 
-xd <- xd %>%
-  filter(xd$combo != "ZX")
+#xd <- xd %>%
+#  filter(xd$combo != "ZX")
+
+xd %>%
+  filter(combo == "ZX")
 
 # survival formula
 surv.tt.drug <- Surv(time = xd$total_min, event = rep(1, nrow(xd)))
@@ -239,13 +243,15 @@ tt.drug1 <- survfit(surv.tt.drug ~ combo, data=xd)
 tt.drug1
 ``` 
 
-I'm not sure if this is a valid or useful comparison (Jordan?), but pigs given only zoletil had shorter total times (median total time = `r surv_median(tt.drug1)[1,2]` mins, n = `r tt.drug1$n[1]`) than pigs given zoletil and xylazine. There was no clear difference among the latter group, though there was a tendency for pigs that were not treated with a reversal drug to have shorter total times (median total time = `r surv_median(tt.drug1)[2,2]` mins, n = `r tt.drug1$n[2]`) than those administered atipamezole (median total time = `r surv_median(tt.drug1)[3,2]` mins, n = `r tt.drug1$n[3]`) or yohimbine (median total time = `r surv_median(tt.drug1)[4,2]` mins, n = `r tt.drug1$n[4]`). 
+Pigs that were administered zoletil and xylazine but not a reversal agent had a much shorter total time than pigs given any other combination of drugs (median total time ZX = `r surv_median(tt.drug1)[2,2]` mins, n = `r tt.drug1$n[2]`). I suppose this is because the reason that they weren't given any reversal is because they declined to hang around and wait for it, so it's not a valid comparison of the effects of different drug combinations. 
+
+I'm not sure if this is a valid or useful comparison (Jordan?), but pigs given only zoletil had only slightly longer total times (median total time = `r surv_median(tt.drug1)[1,2]` mins, n = `r tt.drug1$n[1]`) than pigs given zoletil and xylazine with reversal. There was no clear difference among the latter group  (median total time ZX+A = `r surv_median(tt.drug1)[3,2]` mins, n = `r tt.drug1$n[3]`; median total time ZX+Y = `r surv_median(tt.drug1)[4,2]` mins, n = `r tt.drug1$n[4]`). 
 
 ```{r plot drug combo tt}
 ggsurvplot(tt.drug1, data=xd, conf.int = T, 
            palette = "jama",
            legend = "bottom", legend.title = "Drug regime",
-           legend.labs = c("Z", "ZX + A", "ZX + Y"),
+           legend.labs = c("Z", "ZX", "ZX+A", "ZX+Y"),
            ggtheme = theme_survminer(font.caption = c(10, "plain", "black")))  +
   xlab("Time (mins)") +
   ylab("Proportion of pigs") +
@@ -263,7 +269,7 @@ ggplot(tt.drug1.median) +
 
 ```
 
-Again, the zoletil only treatment is perfectly confounded with pole syringe administration and all darted pigs received xylazine except for the four in a hurry.  
+Again, the zoletil only treatment is perfectly confounded with pole syringe administration: all darted pigs received xylazine.  
 
 ```{r drug confounding}
 xd %>% group_by(combo, capture_method) %>%
@@ -280,7 +286,7 @@ We don't seem to have consistent data for scoring or describing injuries, but we
 
 **Q3 Did Body temperature and hyperthermia risk differ among treatments?**
 
-I suspect this might depend on when the temperature was taken. For manually restrained pigs, it was taken while the pig was being collared, shortly before release. I presume it was taken during collaring for immobilised pigs, in which case it mightn't be an accurate representation of temperature during prolonged recovery when animals might suffer from poor thermoregulation?
+It seems that for all pigs, temperature was taken during handling. This makes for a tidy oranges with oranges comparison, but it mightn't be an accurate representation of temperature during prolonged recovery when animals might suffer from poor thermoregulation?
 
 *Expectation 3.1: Average body temperature during handling differed among treatments.*
 
