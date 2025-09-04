@@ -1,0 +1,378 @@
+---
+title: "Pig survival times"
+format: pdf
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, echo=F}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+```{r}
+library(tidyverse)
+library(survival)
+library(survminer)
+library(lubridate)
+library(rjags)
+library(runjags)
+library(ggmcmc)
+library(ggpubr)
+source("scripts/Functions.R")
+```
+
+
+
+
+
+```{r load and tidy data}
+s <- read.csv("input/working_pig_surv_2025-05-30.csv", header = T) %>%
+  janitor::clean_names() %>%
+  mutate(date_time = as.POSIXct(date_time, format="%d/%m/%Y %H:%M", tz="Australia/Brisbane"),
+         restraint_time = as.POSIXct(restraint_time, format="%d/%m/%Y %H:%M"),
+         restraint_time = ymd_hms(restraint_time, tz="Australia/Brisbane"),
+         release_time = as.POSIXct(release_time, format="%d/%m/%Y %H:%M"),
+         release_time = ymd_hms(release_time, tz="Australia/Brisbane"),
+         standing_time = as.POSIXct(standing_time, format="%d/%m/%Y %H:%M"),
+         standing_time = ymd_hms(standing_time, tz="Australia/Brisbane"),
+         dose_yohimbine_mg = as.numeric(dose_yohimbine_mg),
+         dose_atipamezole_mg = as.numeric(dose_atipamezole_mg),
+         total_min = NA) 
+
+
+s$method <- factor(s$method, levels = c("Darting", "Pole syringe", "Manual"))
+
+n_manual <- length(which(s$capture_method == "Manual"))
+n_drug <- nrow(s) - n_manual
+
+```
+
+The inconsistent time recording has been a bigger nightmare than I thought, but I think I'm there now. The times and durations recorded for each set of studies are a bit of a shitfight, but they boil down to this:
+ 
+![Flow chart showing timed components for each method](background/capture_process.png)  
+Items labelled in green are recorded directly. Items labelled in white are inferred from items in green. Items labelled in grey are unavailable.  
+
+{{< pagebreak >}}
+
+I can't calculate the real total time for drugged pigs because the latent period from arrival at the trap until drug administration wasn't recorded. Total duration can therefore only start when pigs are jabbed, darted or restrained. This means that for manual pigs, total time =  handling time.  
+
+From the ms: We quantified induction time (IT), recumbent time (RT), and total time (TT) (Hampton et al. 2016b). We measured IT as…., RT as the time from initial recumbency to the return to standing. There was no IT for pigs that were not chemically immobilised, and RT and TT were taken as the duration of the period for which the pig was restrained. We defined TT as the cumulative total duration of all procedures (Ponjoan et al. 2008), and was calculated as IT + RT.
+
+Both Pete and Darren have broken their durations down into handling and recovery, but Jordan hasn't.
+
+This means that I need to calculate RT as handling_min + recovery_min, and then total_min as IT + RT.  
+
+I need to calculate total duration in minutes as induction duration + handling duration + recovery duration (originally labelled reversal duration for darted pigs). 
+
+
+```{r total durations}
+# Sum handling and recovery into recumbent time (RT), ignoring recovery when it == NA
+s$rt <- ifelse(
+  is.na(s$recovery_min),
+  s$handling_min,
+  rowSums(s[, c("handling_min", "recovery_min")], na.rm = TRUE)
+)
+# Assign RT = handling time for manual pigs
+s$rt[which(s$method == "Manual")] <- s$handling_min[which(s$method == "Manual")]
+
+# Assign total time = induction + RT for drugged pigs
+s$total_min <- s$induction_min + s$rt
+
+# Assign total time = handling time for manual pigs
+s$total_min[which(s$method == "Manual")] <- s$rt[which(s$method == "Manual")]
+
+# Greatest total time
+max.recovery <- as.numeric(s$recovery_min[which(s$total_min == max(s$total_min, na.rm = T))])
+```
+
+
+## indcution time \~ capture method (pole, dart)
+
+```{r induction time by capture method, include = T}
+hist(s$induction_min)
+range(s$induction_min, na.rm=T)
+table(s$induction_min, s$method)
+
+surv.it <- Surv(time = s$induction_min, event = rep(1, nrow(s)))
+
+# KM survival model across all
+it_all <- survfit(surv.it ~ 1, data=s)
+it_all
+
+surv_median(it_all)
+
+# KM survival model by method
+it1 <- survfit(surv.it ~ method, data=s)
+it1
+surv_median(it1)
+
+```
+
+As expected, there's no real difference in induction time between pole-jabbed and darted pigs.      
+
+
+```{r plot induction time by capture method}
+it_plot <- ggsurvplot(it1, data=s, conf.int = T, 
+                       palette = jama_palette3,
+                       legend = "none", legend.title = "Capture method",
+                       ggtheme = theme_survminer(base_size = 9,
+                                     font.caption = c(9, "plain", "black"),
+                                     font.x = c(9, "plain", "black"),
+                                     font.tickslab = c(9, "plain", "black"),
+                                     font.y = c(9, "plain", "black")))  +
+  xlab("Induction time (mins)") +
+  ylab("Proportion of pigs")
+
+(it_plot2 <- it_plot$plot +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  scale_y_continuous(expand = c(0.01, 0))+
+  theme(plot.margin = unit(c(8,10,0,1), "pt")))
+
+```
+
+## handling time \~ capture method (manual, pole, dart)
+
+```{r handling time by capture method, include = T}
+# survival
+surv.ht <- Surv(time = s$handling_min, event = rep(1, nrow(s)))
+
+# KM survival model across all
+ht_all <- survfit(surv.ht ~ 1, data=s)
+ht_all
+
+surv_median(ht_all)
+
+# KM survival model by method
+ht1 <- survfit(surv.ht ~ method, data=s)
+ht1
+surv_median(ht1)
+
+```
+
+Handling time was clearly shorter for pigs subjected to manual handling (median handling time = `r surv_median(ht1)[3,2]` mins, n = `r ht1$n[3]`) than for pigs subjected to immobilisation via pole syringe (median handling time = `r surv_median(ht1)[2,2]`  mins, n = `r ht1$n[2]`), which was clearly shorter than pigs immobilised by darting (median handling time = `r surv_median(ht1)[1,2]` mins, n = `r ht1$n[1]`).    
+
+
+```{r plot handling time by capture method}
+(ht_plot <- ggsurvplot(ht1, data=s, conf.int = T, 
+                       palette = jama_palette3,
+                       legend = "none", legend.title = "Capture method",
+                       legend.labs = c("Dart", "Pole syringe", "Manual"),
+                       ggtheme = theme_survminer(base_size = 9,
+                                     font.caption = c(9, "plain", "black"),
+                                     font.x = c(9, "plain", "black"),
+                                     font.tickslab = c(9, "plain", "black"),
+                                     font.y = c(9, "plain", "black")))  +
+  xlab("Handling time (mins)") +
+  ylab("Proportion of pigs"))
+
+ht1.median <- as.data.frame(surv_median(ht1)) %>%
+  mutate(strata = factor(gsub("method=", "", strata), 
+                         levels = c("Darting", "Pole syringe", "Manual")))
+
+ggplot(ht1.median) +
+  geom_point(aes(x=strata, y = median)) +
+  geom_linerange(aes(x=strata, ymin = lower, ymax = upper)) +
+  labs(y = "Median handling time (mins)", x = "Treatment",
+       caption = "Median handling time for pigs subjected to different capture methods") +
+  theme_classic()
+
+```
+
+recumbent time \~ capture method (manual, pole, dart)
+
+```{r RT by capture method, include = T}
+# survival
+surv.rt <- Surv(time = s$rt, event = rep(1, nrow(s)))
+
+# KM survival model across all
+rt_all <- survfit(surv.rt ~ 1, data=s)
+rt_all
+
+surv_median(rt_all)
+
+# KM survival model by method
+rt1 <- survfit(surv.rt ~ method, data=s)
+rt1
+surv_median(rt1)
+
+```
+
+Recumbent time was shorter for pigs subjected to manual handling (median handling time = `r surv_median(rt1)[3,2]` mins, n = `r rt1$n[3]`) than for pigs subjected to immobilisation via pole syringe (median handling time = `r surv_median(rt1)[2,2]`  mins, n = `r rt1$n[2]`) or darting (median handling time = `r surv_median(rt1)[1,2]` mins, n = `r rt1$n[1]`). There's a big statistical outlier in the darted pigs due to one pig with a recovery duration of `r max.recovery` minutes, but this doesn't really impact the median.  
+
+Interestingly, the shorter handling time of pole syringe pigs relative to darted pigs falls away here, indicating longer recovery times for these animals.   
+
+```{r plot RT by capture method}
+rt_plot <- ggsurvplot(rt1, data=s, conf.int = T, 
+           palette = jama_palette3,
+           legend = "none", legend.title = "Capture method",
+           legend.labs = c("Dart", "Pole syringe", "Manual"),
+           xlim=c(0,400), 
+           ggtheme = theme_survminer(base_size = 9,
+                                     font.caption = c(9, "plain", "black"),
+                                     font.x = c(9, "plain", "black"),
+                                     font.tickslab = c(9, "plain", "black"),
+                                     font.y = c(9, "plain", "black"))) +
+  xlab("Recumbent time (mins)") +
+  ylab("Proportion of pigs")
+
+(rt_plot2 <- rt_plot$plot +
+  scale_x_continuous(limits = c(0,400), expand = c(0.01, 0), breaks = seq(0,400,100)) +
+  scale_y_continuous(expand = c(0.01, 0))+
+  theme(plot.margin = unit(c(1,10,1,1), "pt")))
+
+rt1.median <- as.data.frame(surv_median(rt1)) %>%
+  mutate(strata = factor(gsub("method=", "", strata), 
+                         levels = c("Manual", "Pole syringe", "Darting")))
+
+ggplot(rt1.median) +
+  geom_point(aes(x=strata, y = median)) +
+  geom_linerange(aes(x=strata, ymin = lower, ymax = upper)) +
+  labs(y = "Median RT (mins)", x = "Treatment",
+       caption = "Median recumbent time for pigs subjected to different capture methods") +
+  theme_classic()
+
+```
+
+Total time \~ capture method  
+
+
+```{r total time, include = T}
+# survival formula
+surv.tt <- Surv(time = s$total_min, event = rep(1, nrow(s)))
+
+# KM survival model by method
+tt1 <- survfit(surv.tt ~ method, data=s)
+tt1
+
+surv_median(tt1)
+
+
+```
+
+Total time was also shorter for pigs subjected to manual handling (median total time = `r surv_median(tt1)[3,2]` mins, n = `r tt1$n[3]`) than for darted pigs (median total time = `r surv_median(tt1)[1,2]` mins, n = `r tt1$n[1]`) and pole syringe pigs (median total time = `r surv_median(tt1)[2,2]` mins, n = `r tt1$n[2]`). The slightly longer RT for pole syringe pigs, relative to darted pigs, comes through again in the total time.  
+
+```{r plot capture method TT}
+tt_plot <- ggsurvplot(tt1, data=s, conf.int = T, 
+           palette = jama_palette3,
+           legend = "bottom", legend.title = "Immobilisation\nmethod",
+           legend.labs = c("Dart", "Pole\nsyringe", "Manual"),
+           ggtheme = theme_survminer(base_size = 9,
+                                     font.caption = c(9, "plain", "black"),
+                                     font.x = c(9, "plain", "black"),
+                                     font.tickslab = c(9, "plain", "black"),
+                                     font.y = c(9, "plain", "black"),
+                                     font.legend = c(9, "plain", "black"))) +
+  xlab("Total time (mins)") +
+  ylab("Proportion of pigs")
+
+(tt_plot2 <- tt_plot$plot +
+  scale_x_continuous(limits = c(0,400), expand = c(0.01, 0)) +
+  scale_y_continuous(expand = c(0.01, 0)) +
+  theme(plot.margin = unit(c(1,10,1,1), "pt")))
+
+
+tt1.median <- as.data.frame(surv_median(tt1)) %>%
+  mutate(strata = factor(gsub("method=", "", strata), 
+                         levels = c("Manual", "Pole syringe", "Darting")))
+
+ggplot(tt1.median) +
+  geom_point(aes(x=strata, y = median)) +
+  geom_linerange(aes(x=strata, ymin = lower, ymax = upper)) +
+  scale_y_continuous(limits = c(0,80), expand=c(0,0)) +
+  labs(y = "Median total time (mins)", x = "Treatment",
+       caption = "Median total time for pigs subjected to different capture methods") +
+  theme_classic()
+```
+
+
+```{r plot all curves}
+library(cowplot)
+
+all_plot <- plot_grid(it_plot2, rt_plot2, tt_plot2, ncol=1,
+                      rel_heights = c(0.31, 0.31, 0.38), 
+                      labels = c("a)", "b)", "c)"), label_x = 0.9, label_size = 10)
+all_plot
+
+ggsave("output/survival_plot_panel.png", all_plot, height = 15, width = 9, units = "cm")
+```
+
+
+*Expectation 1.2: Pigs subjected to different chemical treatments had different handling and total time.*
+
+Again, there's some confounding here that will have to be woven into the discussion.
+
+Maybe:
+
+Recovery time \~ drug combination (zol, zol xyl, zol xyl + yohimbine, zol xyl + atipamezole?)  
+
+Anyway, looking at total time for now...
+
+Total time \~ drug combination (zol, zol xyl, zol xyl + yohimbine, zol xyl + atipamezole?)  
+
+
+```{r model drug combo tt, include = F, eval=F}
+s.d <- s %>% 
+  filter(capture_method != "Manual") %>%
+  mutate(capture_method = factor(capture_method, levels = c("Pole syringe", "Darting")))
+
+# create categorical variable for drug combination
+s.d$combo <- NA
+s.d$combo[which(s.d$drug_s == "Zoletil")] <- "Z"
+s.d$combo[which(s.d$drug_s == "Zoletil/Xylazine")] <- "ZX"
+s.d$combo[which(s.d$dose_yohimbine_mg != "")] <- paste0(s.d$combo[which(s.d$dose_yohimbine_mg != "")], "+Y")
+s.d$combo[which(s.d$dose_atipamezole_mg != "")] <- paste0(s.d$combo[which(s.d$dose_atipamezole_mg != "")], "+A")
+table(s.d$combo)
+
+#s.d <- s.d %>%
+#  filter(s.d$combo != "ZX")
+
+s.d %>%
+  filter(combo == "ZX")
+
+# survival formula
+surv.tt.drug <- Surv(time = s.d$total_min, event = rep(1, nrow(s.d)))
+
+# KM survival model
+tt.drug1 <- survfit(surv.tt.drug ~ combo, data=s.d)
+tt.drug1
+``` 
+
+
+
+```{r plot drug combo tt, eval=F}
+
+# Pigs that were administered zoletil and xylazine but not a reversal agent had a much shorter total time than pigs given any other combination of drugs (median total time ZX = `r surv_median(tt.drug1)[2,2]` mins, n = `r tt.drug1$n[2]`). I suppose this is because the reason that they weren't given any reversal is because they declined to hang around and wait for it, so it's not a valid comparison of the effects of different drug combinations. 
+# 
+# I'm not sure if this is a valid or useful comparison (Jordan?), but pigs given only zoletil had only slightly longer total times (median total time = `r surv_median(tt.drug1)[1,2]` mins, n = `r tt.drug1$n[1]`) than pigs given zoletil and xylazine with reversal. There was no clear difference among the latter group  (median total time ZX+A = `r surv_median(tt.drug1)[3,2]` mins, n = `r tt.drug1$n[3]`; median total time ZX+Y = `r surv_median(tt.drug1)[4,2]` mins, n = `r tt.drug1$n[4]`). 
+
+
+ggsurvplot(tt.drug1, data=xd, conf.int = T, 
+           palette = "jama",
+           legend = "bottom", legend.title = "Drug regime",
+           legend.labs = c("Z", "ZX", "ZX+A", "ZX+Y"),
+           ggtheme = theme_survminer(font.caption = c(10, "plain", "black")))  +
+  xlab("Time (mins)") +
+  ylab("Proportion of pigs") +
+  labs(caption = "KM curves: total time for pigs subjected to different chem immob regimes")
+  
+tt.drug1.median <- as.data.frame(surv_median(tt.drug1)) %>%
+  mutate(strata = gsub("combo=", "", strata))
+
+ggplot(tt.drug1.median) +
+  geom_point(aes(x=strata, y = median)) +
+  geom_linerange(aes(x=strata, ymin = lower, ymax = upper)) +
+  labs(y = "Median total time (mins)", x = "Treatment",
+       caption = "Median total time for pigs subjected to different chem immob regimes") +
+  theme_classic() 
+
+```
+
+Again, the zoletil only treatment is perfectly confounded with pole syringe administration: all darted pigs received xylazine.  
+
+```{r drug confounding, eval=F}
+s.d %>% group_by(combo, capture_method) %>%
+  summarise(n = n()) %>%
+  knitr::kable()
+```
+

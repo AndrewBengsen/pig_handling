@@ -1,0 +1,505 @@
+---
+title: "Pig handling"
+format: pdf
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, echo=F}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(rjags)
+library(runjags)
+library(ggmcmc)
+library(ggpubr)
+library(knitr)
+source("scripts/Functions.R")
+
+```
+
+
+## For discussion: potential outline of non-spatial analyses
+
+Main things to compare among treatments, excluding spatial behaviour after release:
+
+• Times to events (handling, recovery, total time, etc) - these are handled in `survival.qmd`.  
+
+• Adverse outcomes -- injuries, death within 30 days
+
+• Body temperature and hyperthermia
+
+• ...
+
+
+```{r load and tidy data}
+x <- read.csv("input/working_pig_data_2025-05-30.csv", header = T) %>%
+  janitor::clean_names() %>%
+  mutate(date = as.Date(date, format="%d/%m/%Y", tz="Australia/Brisbane"),
+         dose_yohimbine_mg = as.numeric(dose_yohimbine_mg),
+         dose_atipamezole_mg = as.numeric(dose_atipamezole_mg),
+         ambient_temp = as.numeric(ambient_temp),
+         temp_body = as.numeric(temp_body),
+         hyperthermic = 0,
+         mortality = as.Date(mortality, format = "%d/%m/%Y %H:%M"), 
+         death = as.Date(death_date, format = "%d/%m/%Y")) %>%
+  select(-time_of_restraint, -time_of_release, -handling_duration_min,
+         -time_standing, -recovery_duration_min_sec, -reversal_time_min,
+         -total_duration_min_sec, -total_duration_min, -induction_min, 
+         -notes_on_collar_recovery, -notes_on_capture, -collar_data,
+         -notes_on_recovery)
+
+# Pigs with body temp >= 40 are classed as hyperthermic
+x$hyperthermic[which(x$temp_body >=40)] <- 1
+
+x$capture_method <- factor(x$capture_method, levels = c("Manual", "Pole syringe", "Darting"))
+
+n_manual <- length(which(x$capture_method == "Manual"))
+n_drug <- nrow(x) - n_manual
+
+# join with correct times because all the times on the original spreadsheet are fucked up beyond repair
+
+s <- read.csv("input/working_pig_surv_2025-05-30.csv", header = T) %>%
+  janitor::clean_names() %>%
+  mutate(date_time = as.POSIXct(date_time, format="%d/%m/%Y %H:%M", tz="Australia/Brisbane"),
+         restraint_time = as.POSIXct(restraint_time, format="%d/%m/%Y %H:%M"),
+         restraint_time = ymd_hms(restraint_time, tz="Australia/Brisbane"),
+         release_time = as.POSIXct(release_time, format="%d/%m/%Y %H:%M"),
+         release_time = ymd_hms(release_time, tz="Australia/Brisbane"),
+         standing_time = as.POSIXct(standing_time, format="%d/%m/%Y %H:%M"),
+         standing_time = ymd_hms(standing_time, tz="Australia/Brisbane"),
+         total_min = NA) %>%
+  select(-method, - sex, - drug_s, -dose_zoletil_m_l, -dose_xylazine_m_l, 
+         -dose_yohimbine_mg, -dose_atipamezole_mg)
+
+# Sum handling and recovery into recumbent time (RT), ignoring recovery when it == NA
+s$rt <- ifelse(
+  is.na(s$recovery_min),
+  s$handling_min,
+  rowSums(s[, c("handling_min", "recovery_min")], na.rm = TRUE)
+)
+# Assign RT = handling time for manual pigs
+s$rt[which(s$method == "Manual")] <- s$handling_min[which(s$method == "Manual")]
+
+# Assign total time = induction + RT for drugged pigs
+s$total_min <- s$induction_min + s$rt
+
+# Assign total time = handling time for manual pigs
+s$total_min[which(s$method == "Manual")] <- s$rt[which(s$method == "Manual")]
+
+x <- left_join(s, x, by="id")
+
+```
+
+
+```{r tidy up}
+x <- x %>%
+  dplyr::select(date, id, method = capture_method, sex, ambient_temp, temp_body, hyperthermic, 
+                induction_min, handling_min, recovery_min, rt, total_min,
+                drug_s, dose_zoletil_m_l, dose_yohimbine_mg, dose_atipamezole_mg,
+                mortality, death, capture_death = capture_n_adeath_duration, fate) 
+
+```
+
+
+The range of questions we can answer is limited by the lack of standardised measurements, e.g. no mass for manually restrained pigs. 
+
+Also, capture method and drugs are confounded
+
+```{r method table}
+n_method_tab <- x %>%
+  group_by(method, drug_s) %>%
+  summarise(n = n())
+
+kable(n_method_tab)
+```
+
+119 dart captures with zoletil and xylazine (59 atipamezole, 31 yohimbine, 29 without reversal because they didn't need it)
+
+
+{{< pagebreak >}}
+
+
+**Q2 Did the probability of adverse events differ among capture methods?**
+
+We don't seem to have consistent data for scoring or describing injuries, but we could look at differences in probability of death (from causes other than misadventure) within 30 days.
+
+
+```{r explore untimely deaths}
+
+x$lifespan <- x$death - x$date
+
+# How many dead within 14 days of capture
+cat(paste("N dead < 15 days after capture =", length(which(x$lifespan < 15))))
+
+# Which pigs died within 14 days ofcapture?
+x[which(x$lifespan < 15),]
+
+fate_tab <- x %>%
+  filter(lifespan < 15) %>%
+  select(id, method, temp_body, lifespan, fate) %>%
+  arrange(method)
+fate_tab
+
+# list those pigs that died from causes other than misadventure < 15 days post capture
+untimely_pigs <- x$id[which(x$fate %in% c("dead_unknown", "dead_euthanased") & x$lifespan < 15)]
+x$untimely <- 0
+x$untimely[which(x$id %in% untimely_pigs)] <- 1
+
+fate_tab %>% 
+  filter(id %in% untimely_pigs)
+
+n_not_untimely <- nrow(fate_tab) - length(untimely_pigs)
+
+# Save x
+write.csv(x, "input/refined handling data.csv", row.names = F)
+```
+
+Now I need to separate those pigs that died on the day of capture from those that died within 14 days of capture.
+
+```{r untimely deaths after 0 and 1 to 14 days}
+x$ud_0 <- x$ud_14 <- 0
+x$ud_0[which(x$untimely == 1 & x$lifespan == 0)] <- 1
+x$ud_14[which(x$untimely == 1 & x$lifespan != 0)] <- 1
+  
+```
+
+Probability of death from 1 to 14 days after capture.  
+
+```{r pr untimely death binomial}
+ni <- 15000
+nc <- 4
+nadapt <- 1000
+nb <- 1000
+set.seed(1080)
+
+ud14_binom <- x %>%
+  group_by(method) %>%
+  summarise(n = n(),
+            ud = sum(ud_14)) %>%
+  mutate(pr_ud = ud/n)
+
+ud_dat <- list(C = ud14_binom$ud,
+               N = ud14_binom$n,
+               ngroup = 3)
+
+ud_pars <- c("alpha", "bt_alpha")
+
+cat("model {
+  ## Priors
+  for (b in 1:ngroup) {
+    alpha[b] ~ dnorm(0, 0.001)  
+    logit(p[b]) <- alpha[b]
+  }
+
+  ## Likelihood
+  for (b in 1:ngroup) {
+    C[b] ~ dbin(p[b], N[b])
+  }
+
+  ## Derived quantities
+  for (b in 1:ngroup) {
+    bt_alpha[b] <- exp(alpha[b]) / (1 + exp(alpha[b]))
+  }
+
+  # Pairwise differences
+  diff_12 <- bt_alpha[1] - bt_alpha[2]
+  diff_13 <- bt_alpha[1] - bt_alpha[3]
+  diff_23 <- bt_alpha[2] - bt_alpha[3]
+}
+" , fill=TRUE, file="Scripts/pr_untimely_death.txt")
+
+pr_untimely14 <- run.jags(method = "parallel",
+                       model = "Scripts/pr_untimely_death.txt",
+                       monitor = ud_pars,
+                       data = ud_dat,
+                       sample = ni,
+                       n.chains = nc,
+                       adapt = nadapt,
+                       burnin = nb,
+                       summarise = F,
+                       plots = F,
+                       silent.jags = F)
+
+pr_untimely14_list <- as.mcmc.list(pr_untimely14)
+
+ud14_sum <- mod_results_95(pr_untimely14_list)
+ud14_modmat <- ud14_sum$modMat  
+ud14_S <- ud14_sum$S
+
+plot_trace <- F
+if(plot_trace == T){
+  ta <- ggs_traceplot(ud14_S, family = "alpha")
+  da <- ggs_density(ud14_S, family = "bt_alpha") +
+    xlim(c(0, 1))
+}
+
+head(ud14_sum$sumTab)
+
+pr_ud14_manual <- ud14_sum$sumTab$Mean[ud14_sum$sumTab$Par == "bt_alpha[1]"] %>% round(2)
+pr_ud14_pole <- ud14_sum$sumTab$Mean[ud14_sum$sumTab$Par == "bt_alpha[2]"] %>% round(2)
+pr_ud14_dart <- ud14_sum$sumTab$Mean[ud14_sum$sumTab$Par == "bt_alpha[3]"] %>% round(2)
+
+hpdi_ud14_manual <- c(ud14_sum$sumTab$HPDIlower[ud14_sum$sumTab$Par == "bt_alpha[1]"], ud14_sum$sumTab$HPDIupper[ud14_sum$sumTab$Par == "bt_alpha[1]"]) %>%
+  round(2)
+hpdi_ud14_pole <- c(ud14_sum$sumTab$HPDIlower[ud14_sum$sumTab$Par == "bt_alpha[2]"], ud14_sum$sumTab$HPDIupper[ud14_sum$sumTab$Par == "bt_alpha[2]"]) %>%
+  round(2)
+hpdi_ud14_dart <- c(ud14_sum$sumTab$HPDIlower[ud14_sum$sumTab$Par == "bt_alpha[3]"], ud14_sum$sumTab$HPDIupper[ud14_sum$sumTab$Par == "bt_alpha[3]"]) %>%
+  round(2)
+
+pr_ud14_df<- ud14_sum$sumTab[c(4:6),]  %>%
+  select(Par, Mean, HPDIlower, HPDIupper) %>%
+  mutate(Par = c("Manual", "Pole syringe", "Dart"))
+
+ggplot(pr_ud14_df) +
+  geom_point(aes(x=Par, y=Mean)) +
+  geom_linerange(aes(x=Par, ymin=HPDIlower, ymax= HPDIupper))
+
+ud14_post <- as.data.frame(ud14_modmat[, c(5:7)])
+ud14_post_long <- ud14_post %>%
+  pivot_longer(cols = everything(), names_to = "parameter", values_to = "value") %>%
+  mutate(parameter = factor(parameter, labels = c("Manual restraint", "Pole syringe", "Darting")))
+
+ggplot(ud14_post_long) +
+  geom_density(aes(x=value, fill=parameter, colour=parameter), alpha=0.3) +  theme_pubr(base_size = 8) +
+  ylab("Density") +
+  xlab("Value") +
+  scale_y_continuous(expand=c(0,0), limits = c(0,75)) +
+  scale_x_continuous(expand=c(0,0)) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(colour=1),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        axis.line=element_line(),
+        legend.key.size = unit(0.3, "cm")) 
+
+```
+    
+Only two pigs died within 14 days of capture. Both pigs died the day after capture in Program B. The probability of a pig dying within 14 days of capture in Program B was `r pr_ud14_pole` (95% HPDI = `r hpdi_ud14_pole[1]`, `r hpdi_ud14_pole[2]`).  
+
+Next, estimate the probability of dying on the day of capture.  
+
+
+```{r pr dead on capture binomial}
+
+
+x[x$ud_0 == 1, ]
+
+x_binom_doc <- x %>%
+  group_by(method) %>%
+  summarise(n = n(),
+            doc = sum(ud_0)) %>%
+  mutate(pr_doc = doc/n)
+
+doc_dat <- list(C = x_binom_doc$doc,
+                N = x_binom_doc$n,
+                ngroup = 3)
+
+doc_pars <- c("alpha", "bt_alpha")
+
+
+pr_doc <- run.jags(method = "parallel",
+                       model = "Scripts/pr_untimely_death.txt",
+                       monitor = doc_pars,
+                       data = doc_dat,
+                       sample = ni,
+                       n.chains = nc,
+                       adapt = nadapt,
+                       burnin = nb,
+                       summarise = F,
+                       plots = F,
+                       silent.jags = F)
+
+pr_doc_list <- as.mcmc.list(pr_doc)
+
+doc_sum <- mod_results_95(pr_doc_list)
+doc_modmat <- doc_sum$modMat  
+doc_S <- doc_sum$S
+
+plot_trace <- F
+if(plot_trace == T){
+  ta <- ggs_traceplot(doc_S, family = "alpha")
+  da <- ggs_density(doc_S, family = "bt_alpha") +
+    xlim(c(0, 1))
+}
+
+head(doc_sum$sumTab)
+
+pr_doc_manual <- doc_sum$sumTab$Mean[doc_sum$sumTab$Par == "bt_alpha[1]"] %>% round(2)
+pr_doc_pole <- doc_sum$sumTab$Mean[doc_sum$sumTab$Par == "bt_alpha[2]"] %>% round(2)
+pr_doc_dart <- doc_sum$sumTab$Mean[doc_sum$sumTab$Par == "bt_alpha[3]"] %>% round(2)
+
+hpdi_doc_manual <- c(doc_sum$sumTab$HPDIlower[doc_sum$sumTab$Par == "bt_alpha[1]"], doc_sum$sumTab$HPDIupper[doc_sum$sumTab$Par == "bt_alpha[1]"]) %>%
+  round(2)
+hpdi_doc_pole <- c(doc_sum$sumTab$HPDIlower[doc_sum$sumTab$Par == "bt_alpha[2]"], doc_sum$sumTab$HPDIupper[doc_sum$sumTab$Par == "bt_alpha[2]"]) %>%
+  round(2)
+hpdi_doc_dart <- c(doc_sum$sumTab$HPDIlower[doc_sum$sumTab$Par == "bt_alpha[3]"], doc_sum$sumTab$HPDIupper[doc_sum$sumTab$Par == "bt_alpha[3]"]) %>%
+  round(2)
+
+pr_doc_df<- doc_sum$sumTab[c(4:6),]  %>%
+  select(Par, Mean, HPDIlower, HPDIupper) %>%
+  mutate(Par = c("Manual", "Pole syringe", "Dart"))
+
+ggplot(pr_doc_df) +
+  geom_point(aes(x=Par, y=Mean)) +
+  geom_linerange(aes(x=Par, ymin=HPDIlower, ymax= HPDIupper)) +
+  ylab("Pr(dead at capture)") +
+  xlab("Capture method") +
+  scale_y_continuous(expand=c(0.01,0), limits = c(0,0.1)) +
+  theme_pubr(base_size = 8) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(colour=1),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        axis.line=element_line(),
+        legend.key.size = unit(0.3, "cm")) 
+
+doc_post <- as.data.frame(doc_modmat[, c(5:7)])
+doc_post_long <- doc_post %>%
+  pivot_longer(cols = everything(), names_to = "parameter", values_to = "value") %>%
+  mutate(parameter = factor(parameter, labels = c("Manual restraint", "Pole syringe", "Darting")))
+
+ggplot(doc_post_long) +
+  geom_density(aes(x=value, fill=parameter, colour=parameter), alpha=0.3) +  
+  ylab("Density") +
+  xlab("Value") +
+  scale_y_continuous(expand=c(0,0)) +
+  scale_x_continuous(expand=c(0,0)) +
+    theme_pubr(base_size = 8) +
+  coord_cartesian(ylim = c(0,100)) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(colour=1),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        axis.line=element_line(),
+        legend.key.size = unit(0.3, "cm")) 
+
+```
+    
+**Q3 Did Body temperature and hyperthermia risk differ among treatments?**
+
+It seems that for all pigs, temperature was taken during handling. This makes for a tidy oranges with oranges comparison, but it mightn't be an accurate representation of temperature during prolonged recovery when animals might suffer from poor thermoregulation?
+
+*Expectation 3.1: Average body temperature during handling differed among treatments.*
+
+I don't have a strong prior expectation that any treatment will be 'better' than any other with respect to body temperature during handling.
+
+• Body temp \~ treatment + ambient temp
+
+• Pr(body temp \> 40C) \~ treatment + ambient temp
+
+```{r pr hyperthermia binomial}
+x_binom_hyp <- x %>%
+  group_by(method) %>%
+  summarise(n = n(),
+            hyp = sum(hyperthermic)) %>%
+  mutate(pr_hyp = hyp/n)
+
+hyp_dat <- list(C = x_binom_hyp$hyp,
+                N = x_binom_hyp$n,
+                ngroup = 3)
+
+hyp_pars <- doc_pars
+
+pr_hyp <- run.jags(method = "parallel",
+                       model = "Scripts/pr_untimely_death.txt",
+                       monitor = hyp_pars,
+                       data = hyp_dat,
+                       sample = ni,
+                       n.chains = nc,
+                       adapt = nadapt,
+                       burnin = nb,
+                       summarise = F,
+                       plots = F,
+                       silent.jags = F)
+
+pr_hyp_list <- as.mcmc.list(pr_hyp)
+
+hyp_sum <- mod_results_95(pr_hyp_list)
+hyp_modmat <- hyp_sum$modMat  
+hyp_S <- hyp_sum$S
+
+plot_trace <- F
+if(plot_trace == T){
+  ta <- ggs_traceplot(hyp_S, family = "alpha")
+  da <- ggs_density(hyp_S, family = "bt_alpha") +
+    xlim(c(0, 1))
+}
+
+head(hyp_sum$sumTab)
+
+pr_hyp_manual <- hyp_sum$sumTab$Mean[hyp_sum$sumTab$Par == "bt_alpha[1]"] %>% round(2)
+pr_hyp_pole <- hyp_sum$sumTab$Mean[hyp_sum$sumTab$Par == "bt_alpha[2]"] %>% round(2)
+pr_hyp_dart <- hyp_sum$sumTab$Mean[hyp_sum$sumTab$Par == "bt_alpha[3]"] %>% round(2)
+
+hpdi_hyp_manual <- c(hyp_sum$sumTab$HPDIlower[hyp_sum$sumTab$Par == "bt_alpha[1]"], hyp_sum$sumTab$HPDIupper[hyp_sum$sumTab$Par == "bt_alpha[1]"]) %>%
+  round(2)
+hpdi_hyp_pole <- c(hyp_sum$sumTab$HPDIlower[hyp_sum$sumTab$Par == "bt_alpha[2]"], hyp_sum$sumTab$HPDIupper[hyp_sum$sumTab$Par == "bt_alpha[2]"]) %>%
+  round(2)
+hpdi_hyp_dart <- c(hyp_sum$sumTab$HPDIlower[hyp_sum$sumTab$Par == "bt_alpha[3]"], hyp_sum$sumTab$HPDIupper[hyp_sum$sumTab$Par == "bt_alpha[3]"]) %>%
+  round(2)
+
+pr_hyp_df<- hyp_sum$sumTab[c(4:6),]  %>%
+  select(Par, Mean, HPDIlower, HPDIupper) %>%
+  mutate(Par = c("Manual", "Pole syringe", "Dart"))
+
+ggplot(pr_hyp_df) +
+  geom_point(aes(x=Par, y=Mean)) +
+  geom_linerange(aes(x=Par, ymin=HPDIlower, ymax= HPDIupper)) +
+  ylab("Pr(dead at capture)") +
+  xlab("Capture method") +
+  scale_y_continuous(expand=c(0.01,0), limits = c(0,0.3)) +
+  theme_pubr(base_size = 8) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(colour=1),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        axis.line=element_line(),
+        legend.key.size = unit(0.3, "cm")) 
+
+hyp_post <- as.data.frame(hyp_modmat[, c(5:7)])
+hyp_post_long <- hyp_post %>%
+  pivot_longer(cols = everything(), names_to = "parameter", values_to = "value") %>%
+  mutate(parameter = factor(parameter, labels = c("Manual restraint", "Pole syringe", "Darting")))
+
+ggplot(hyp_post_long) +
+  geom_density(aes(x=value, fill=parameter, colour=parameter), alpha=0.3) +  
+  ylab("Density") +
+  xlab("Value") +
+  scale_y_continuous(expand=c(0,0), limits = c(0,15)) +
+  scale_x_continuous(expand=c(0,0)) +
+    theme_pubr(base_size = 8) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size=8),
+        legend.title = element_blank(),
+        axis.text = element_text(colour=1),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        axis.line=element_line(),
+        legend.key.size = unit(0.3, "cm")) 
+
+```
+
+Were pigs that died within 14 days hyperthermic?
+
+```{r explore hyperthermia}
+x[x$ud_14 == 1,]
+x[x$ud_0 == 1,]
+```
+
+
+
+
+
