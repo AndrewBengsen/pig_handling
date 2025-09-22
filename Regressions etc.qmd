@@ -11,13 +11,9 @@ knitr::opts_chunk$set(echo = F, warning = F, message = F)
 ```
 
 ```{r}
-library(tidyverse)
-library(lubridate)
-library(rjags)
-library(runjags)
-library(ggmcmc)
-library(ggpubr)
-library(knitr)
+library(tidyverse); library(lubridate)
+library(rjags); library(runjags)
+library(ggmcmc); library(ggpubr); library(knitr)
 source("scripts/Functions.R")
 
 ```
@@ -52,6 +48,12 @@ x <- read.csv("input/working_pig_data_2025-05-30.csv", header = T) %>%
          -total_duration_min_sec, -total_duration_min, -induction_min, 
          -notes_on_collar_recovery, -notes_on_capture, -collar_data,
          -notes_on_recovery)
+
+# Join with SD's data on repeat doses for darted pigs
+repeats <- read.csv("input/repeat_doses.csv", header = T) 
+
+x <- left_join(x, repeats)
+rm(repeats)
 
 # Pigs with body temp >= 40 are classed as hyperthermic
 x$hyperthermic[which(x$temp_body >=40)] <- 1
@@ -101,7 +103,7 @@ x <- x %>%
   dplyr::select(date, id, method = capture_method, sex, ambient_temp, temp_body, hyperthermic, 
                 induction_min, handling_min, recovery_min, rt, total_min,
                 drug_s, dose_zoletil_m_l, dose_yohimbine_mg, dose_atipamezole_mg,
-                mortality, death, capture_death = capture_n_adeath_duration, fate) 
+                mortality, death, capture_death = capture_n_adeath_duration, fate, doses, admin_loc2) 
 
 ```
 
@@ -287,8 +289,6 @@ Next, estimate the probability of dying on the day of capture.
 
 
 ```{r pr dead on capture binomial}
-
-
 x[x$ud_0 == 1, ]
 
 x_binom_doc <- x %>%
