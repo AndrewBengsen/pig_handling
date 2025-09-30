@@ -16,6 +16,8 @@ library(rjags); library(runjags)
 library(ggmcmc); library(ggpubr); library(knitr)
 source("scripts/Functions.R")
 
+runmods <- F
+
 ```
 
 
@@ -31,6 +33,7 @@ Main things to compare among treatments, excluding spatial behaviour after relea
 
 • ...
 
+The dose per kg data are all fucked up in the original spreadsheet, so recalculate here.  
 
 ```{r load and tidy data}
 x <- read.csv("input/working_pig_data_2025-05-30.csv", header = T) %>%
@@ -43,11 +46,16 @@ x <- read.csv("input/working_pig_data_2025-05-30.csv", header = T) %>%
          hyperthermic = 0,
          mortality = as.Date(mortality, format = "%d/%m/%Y %H:%M"), 
          death = as.Date(death_date, format = "%d/%m/%Y")) %>%
+  mutate(dose_xylazine_mg_kg = dose_xylazine_m_l / mass_kg,
+         #dose_zoletil_mg_kg = dose_zoletil_m_l / mass_kg,
+         dose_yohimbine_mg_kg = dose_yohimbine_mg / mass_kg,
+         dose_atipamezole_mg_kg = dose_atipamezole_mg / mass_kg) %>%
   select(-time_of_restraint, -time_of_release, -handling_duration_min,
          -time_standing, -recovery_duration_min_sec, -reversal_time_min,
          -total_duration_min_sec, -total_duration_min, -induction_min, 
          -notes_on_collar_recovery, -notes_on_capture, -collar_data,
          -notes_on_recovery)
+
 
 # Join with SD's data on repeat doses for darted pigs
 repeats <- read.csv("input/repeat_doses.csv", header = T) 
@@ -60,38 +68,15 @@ x$hyperthermic[which(x$temp_body >=40)] <- 1
 
 x$capture_method <- factor(x$capture_method, levels = c("Manual", "Pole syringe", "Darting"))
 
+# Assign 1 dose to all of Darren's pigs, until we know better
+x$doses[which(x$method == "Pole syringe")] <- 1
+
 n_manual <- length(which(x$capture_method == "Manual"))
 n_drug <- nrow(x) - n_manual
 
 # join with correct times because all the times on the original spreadsheet are fucked up beyond repair
-
-s <- read.csv("input/working_pig_surv_2025-05-30.csv", header = T) %>%
-  janitor::clean_names() %>%
-  mutate(date_time = as.POSIXct(date_time, format="%d/%m/%Y %H:%M", tz="Australia/Brisbane"),
-         restraint_time = as.POSIXct(restraint_time, format="%d/%m/%Y %H:%M"),
-         restraint_time = ymd_hms(restraint_time, tz="Australia/Brisbane"),
-         release_time = as.POSIXct(release_time, format="%d/%m/%Y %H:%M"),
-         release_time = ymd_hms(release_time, tz="Australia/Brisbane"),
-         standing_time = as.POSIXct(standing_time, format="%d/%m/%Y %H:%M"),
-         standing_time = ymd_hms(standing_time, tz="Australia/Brisbane"),
-         total_min = NA) %>%
-  select(-method, - sex, - drug_s, -dose_zoletil_m_l, -dose_xylazine_m_l, 
-         -dose_yohimbine_mg, -dose_atipamezole_mg)
-
-# Sum handling and recovery into recumbent time (RT), ignoring recovery when it == NA
-s$rt <- ifelse(
-  is.na(s$recovery_min),
-  s$handling_min,
-  rowSums(s[, c("handling_min", "recovery_min")], na.rm = TRUE)
-)
-# Assign RT = handling time for manual pigs
-s$rt[which(s$method == "Manual")] <- s$handling_min[which(s$method == "Manual")]
-
-# Assign total time = induction + RT for drugged pigs
-s$total_min <- s$induction_min + s$rt
-
-# Assign total time = handling time for manual pigs
-s$total_min[which(s$method == "Manual")] <- s$rt[which(s$method == "Manual")]
+s <- read.csv("output/revised_time-to-event_data.csv") %>%
+  select(id, induction_min, rt, total_min)
 
 x <- left_join(s, x, by="id")
 
@@ -101,11 +86,13 @@ x <- left_join(s, x, by="id")
 ```{r tidy up}
 x <- x %>%
   dplyr::select(date, id, method = capture_method, sex, ambient_temp, temp_body, hyperthermic, 
-                induction_min, handling_min, recovery_min, rt, total_min,
-                drug_s, dose_zoletil_m_l, dose_yohimbine_mg, dose_atipamezole_mg,
-                mortality, death, capture_death = capture_n_adeath_duration, fate, doses, admin_loc2) 
+                induction_min, rt, total_min, mass_kg, heart_rate, respiratory_rate,
+                drug_s, dose_zoletil_mg_kg, dose_xylazine_mg_kg, dose_yohimbine_mg_kg, dose_atipamezole_mg_kg,
+                mortality, death, capture_death = capture_n_adeath_duration, fate, doses, admin_loc2, collar_shed, n_in_trap) 
 
 ```
+
+
 
 
 The range of questions we can answer is limited by the lack of standardised measurements, e.g. no mass for manually restrained pigs. 
@@ -148,7 +135,7 @@ fate_tab <- x %>%
 fate_tab
 
 # list those pigs that died from causes other than misadventure < 15 days post capture
-untimely_pigs <- x$id[which(x$fate %in% c("dead_unknown", "dead_euthanased") & x$lifespan < 15)]
+untimely_pigs <- x$id[which(x$fate %in% c("dead_unknown", "dead_euthanased", "dead_handling") & x$lifespan < 15)]
 x$untimely <- 0
 x$untimely[which(x$id %in% untimely_pigs)] <- 1
 
@@ -161,13 +148,13 @@ n_not_untimely <- nrow(fate_tab) - length(untimely_pigs)
 write.csv(x, "input/refined handling data.csv", row.names = F)
 ```
 
-Now I need to separate those pigs that died on the day of capture from those that died within 14 days of capture.
+Now I need to separate those pigs that died during capture from those that died within 14 days of release.
 
 ```{r untimely deaths after 0 and 1 to 14 days}
-x$ud_0 <- x$ud_14 <- 0
+x$ud_0 <- x$immediate_mortality <- x$ud_14 <- 0
 x$ud_0[which(x$untimely == 1 & x$lifespan == 0)] <- 1
-x$ud_14[which(x$untimely == 1 & x$lifespan != 0)] <- 1
-  
+x$ud_14[which(x$untimely == 1 & !(x$fate %in% c("dead_euthanased", "dead_handling")))] <- 1
+x$immediate_mortality[which(x$untimely == 1 & x$fate %in% c("dead_euthanased", "dead_handling"))] <- 1  
 ```
 
 Probability of death from 1 to 14 days after capture.  
@@ -283,18 +270,18 @@ ggplot(ud14_post_long) +
 
 ```
     
-Only two pigs died within 14 days of capture. Both pigs died the day after capture in Program B. The probability of a pig dying within 14 days of capture in Program B was `r pr_ud14_pole` (95% HPDI = `r hpdi_ud14_pole[1]`, `r hpdi_ud14_pole[2]`).  
+Only three pigs died within 14 days of capture. All died within 24 hours of release - two in Program B and one in Program C. The probability of a pig dying within 14 days of capture in Program B was `r pr_ud14_pole` (95% HPDI = `r hpdi_ud14_pole[1]`, `r hpdi_ud14_pole[2]`) and in Program c it was `r pr_ud14_manual` (95% HPDI = `r hpdi_ud14_manual[1]`, `r hpdi_ud14_manual[2]`).  
 
 Next, estimate the probability of dying on the day of capture.  
 
 
 ```{r pr dead on capture binomial}
-x[x$ud_0 == 1, ]
+x[x$immediate_mortality == 1, ]
 
 x_binom_doc <- x %>%
   group_by(method) %>%
   summarise(n = n(),
-            doc = sum(ud_0)) %>%
+            doc = sum(immediate_mortality)) %>%
   mutate(pr_doc = doc/n)
 
 doc_dat <- list(C = x_binom_doc$doc,
@@ -302,7 +289,6 @@ doc_dat <- list(C = x_binom_doc$doc,
                 ngroup = 3)
 
 doc_pars <- c("alpha", "bt_alpha")
-
 
 pr_doc <- run.jags(method = "parallel",
                        model = "Scripts/pr_untimely_death.txt",
@@ -492,14 +478,258 @@ ggplot(hyp_post_long) +
 
 ```
 
-Were pigs that died within 14 days hyperthermic?
+Were pigs that died within 14 days hyperthermic? None of the five pigs that died during handling (immediate mortality) were hyperthermic and only one of the pigs that died within 24 hours of release was. 
 
 ```{r explore hyperthermia}
-x[x$ud_14 == 1,]
-x[x$ud_0 == 1,]
+untimely_vars <- c("id", "method", "sex", "ambient_temp", "temp_body", "hyperthermic", "induction_min", "total_min", "doses", "dose_zoletil_mg_kg", "dose_xylazine_mg_kg")
+x[x$ud_14 == 1, untimely_vars]
+x[x$immediate_mortality == 1, untimely_vars]
 ```
 
 
+Any relationship between recumbency and hyperthermia?
+
+```{r hyperthermia x recumbency, eval=F}
+
+xrt <- x %>%
+  filter(!(is.na(rt)))
+
+ggplot(xrt) + 
+  geom_point(aes(x=rt, y=temp_body)) +
+  facet_wrap(~method)
+
+if(runmods == T){
+  cat(
+    "model {
+  ## Priors for each method
+  for (m in 1:nmethod) {
+    alpha[m] ~ dnorm(0, 0.001)  # Intercept for method m
+    beta[m] ~ dnorm(0, 0.001)   # Slope for method m
+  }
+
+  ## Likelihood
+  for (i in 1:N) {
+    mu[i] <- alpha[method[i]] + beta[method[i]] * rt[i]
+    temp[i] ~ dnorm(mu[i], tau)
+  }
+
+  ## Precision and standard deviation
+  tau ~ dgamma(0.001, 0.001)
+  sigma <- 1 / sqrt(tau)
 
 
+ ## Predicted values across x = 5, 10, 15, ... 330 for each method
+ for (m in 1:nmethod) {
+    for (j in 1:60) {
+      xpred[j,m] <- alpha[m] + beta[m] * (j * 5)
+    }
+  }
+}
+", fill=TRUE, file="Scripts/temp_by_method_model.txt")
+  
+  hyp_rt_dat <- list(
+    temp = xrt$temp_body,
+    rt = xrt$rt,
+    method = as.numeric(xrt$method),
+    nmethod = 3,
+    N = nrow(xrt)
+  )
+  
+  hyp_rt_pars <- c("alpha", "beta", "xpred")
+  
+  hyp_rt <- run.jags(
+    method = "parallel",
+    model = "Scripts/temp_by_method_model.txt",
+    monitor = hyp_rt_pars,
+    data = hyp_rt_dat,
+    sample = ni,
+    n.chains = nc,
+    adapt = nadapt,
+    burnin = nb,
+    summarise = F,
+    plots = F,
+    silent.jags = F
+  )
+  
+  hyp_rt_list <- as.mcmc.list(hyp_rt)
+  
+  saveRDS(hyp_rt_list, "output/temp_x_rt.RDS") 
+} else {
+  hyp_rt_list <- readRDS("output/temp_x_rt.RDS")
+}
 
+hyp_rt_sum <- mod_results_95(hyp_rt_list)
+hyp_rt_modmat <- hyp_rt_sum$modMat  
+hyp_rt_S <- hyp_rt_sum$S
+
+plot_trace <- F
+if(plot_trace == T){
+  ta <- ggs_traceplot(hyp_rt_S, family = "alpha")
+  da <- ggs_density(hyp_rt_S, family = "beta") 
+}
+
+head(hyp_rt_sum$sumTab)
+
+hyp_rt_manual <- hyp_rt_sum$sumTab$Mean[hyp_rt_sum$sumTab$Par == "alpha[1]"] %>% round(2)
+hyp_rt_pole <- hyp_rt_sum$sumTab$Mean[hyp_rt_sum$sumTab$Par == "alpha[2]"] %>% round(2)
+hyp_rt_dart <- hyp_rt_sum$sumTab$Mean[hyp_rt_sum$sumTab$Par == "alpha[3]"] %>% round(2)
+
+hpdi_hyp_manual <- c(hyp_rt_sum$sumTab$HPDIlower[hyp_rt_sum$sumTab$Par == "alpha[1]"], hyp_rt_sum$sumTab$HPDIupper[hyp_rt_sum$sumTab$Par == "alpha[1]"]) %>%
+  round(2)
+hpdi_hyp_pole <- c(hyp_rt_sum$sumTab$HPDIlower[hyp_rt_sum$sumTab$Par == "alpha[2]"], hyp_rt_sum$sumTab$HPDIupper[hyp_rt_sum$sumTab$Par == "alpha[2]"]) %>%
+  round(2)
+hpdi_hyp_dart <- c(hyp_rt_sum$sumTab$HPDIlower[hyp_rt_sum$sumTab$Par == "alpha[3]"], hyp_rt_sum$sumTab$HPDIupper[hyp_rt_sum$sumTab$Par == "alpha[3]"]) %>%
+  round(2)
+
+sumTab <- hyp_rt_sum$sumTab[!grepl("mu", hyp_rt_sum$sumTab$Par), ]
+
+xrt %>% 
+  group_by(method) %>%
+  summarise(min_rt = min(rt),
+            max_rt = max(rt),
+            n=n())
+
+```
+
+
+Check out the pigs with long inductions - what's going on there? Induction > 20 mins can be considered long in pigs, and no pole pigs had IT > 20 mins. 
+
+```{r long inductions}
+x[which(x$induction_min > 20), c(untimely_vars, "admin_loc2")]
+
+# relationship between IT and temp?
+
+ggplot(x) + 
+  geom_point(aes(x=induction_min, y=temp_body)) +
+  facet_wrap(~method)
+
+x %>%
+  group_by(method) %>%
+  summarise(max_tt = max(total_min, na.rm = T))
+
+mr <- x %>%
+  filter(method == "Manual") 
+
+mr[which(mr$total_min > 20),]
+
+# What proportion released < 10 mins?
+length(which(mr$total_min < 15)) / nrow(mr)
+```
+
+Collar shedding - only one pig shed a collar within 14 days. Nothing much to report here.  
+
+```{r Collar shedding}
+ggplot(x) + 
+  geom_histogram(aes(x=collar_shed))
+
+x$shed14 <- 0
+x$shed14[which(x$collar_shed < 15)] <- 1
+```
+
+
+Multiple darts - 17 darted pigs got two doses. We assume they were all in the arse except two wretched beasts that copped one in the abdomen or near the scrotum.
+
+```{r Mutiple darts}
+table(x$doses)
+x[which(x$doses > 1), c(untimely_vars, "admin_loc2")]
+```
+
+Estimate doses atipamezole and yohimbine doses for methods. The drug details don't actually seem to correspond to the correct individuals (manually restrained pigs have xylazine), but we can get averages.  
+
+```{r check mean doses reported in Table 1}
+cat(paste("mean zoletil dose =", round(mean(x$dose_zoletil_mg_kg, na.rm=T),2), "mg/kg"))
+cat(paste("mean atipamezole dose =", round(mean(x$dose_atipamezole_mg, na.rm=T),2), "mg/kg"))
+cat(paste("mean xylazine dose =", round(mean(x$dose_xylazine_mg_kg, na.rm=T),2), "mg/kg"))
+
+dose_tab <- x %>%
+  group_by(method) %>%
+  summarise(mean_zol = mean(dose_zoletil_mg_kg, na.rm=T),
+            mean_xyl = mean(dose_xylazine_mg_kg, na.rm=T),
+            mean_yoh = mean(dose_yohimbine_mg_kg, na.rm=T),
+            mean_ati = mean(dose_atipamezole_mg_kg, na.rm=T))
+
+dose_tab
+```
+
+Table 2
+
+```{r Table 1}
+sem <- function(x) {
+  x_clean <- x[!is.na(x)]
+  se <- sd(x_clean) / sqrt(length(x_clean))
+  return(se)
+}
+
+
+y <- rnorm(100, 20, 2)
+y[c(3,6,8,54)] <- NA
+
+table2 <- x %>%
+  mutate(respiratory_rate = as.numeric(respiratory_rate)) %>%
+  select(mass_kg, dose_xylazine_mg_kg, dose_zoletil_mg_kg, 
+         dose_yohimbine_mg_kg, dose_atipamezole_mg_kg, temp_body, heart_rate,
+         respiratory_rate) %>%
+  pivot_longer(everything(), names_to = "parameter", values_to = "value") %>%
+  group_by(parameter) %>%
+  summarise(n = length(which(is.na(value)==F)),
+            min = min(value[value>0], na.rm=T),
+            max = max(value, na.rm=T),
+            mean = mean(value, na.rm=T),
+            se = sem(value))
+
+kable(table2, digits=2)
+```
+
+How much higher than intended were X and TZ doses?
+
+```{r}
+x_intended <- 2
+z_intended_A <- 2
+z_intended_B <- 1
+
+x_real <- mean(x$dose_xylazine_mg_kg[which(x$method == "Darting")], na.rm=T)
+z_real_A <- mean(x$dose_zoletil_mg_kg[which(x$method == "Darting")], na.rm=T)
+z_real_B <- mean(x$dose_zoletil_mg_kg[which(x$method == "Pole syringe")], na.rm=T)
+
+# percentage increase in realised dose, relative to indended dose
+x_real_over <- round((x_real - x_intended) / x_intended, 2)*100
+z_real_overA <- round((z_real_A - z_intended_A) / z_intended_A, 2)*100
+z_real_overB <- round((z_real_B - z_intended_B) / z_intended_B, 2)*100
+```
+
+
+How many pigs in Program A didn't get a reversal because they didn't need it?  
+
+```{r no reversal}
+pa <- x %>%
+  filter(method == "Darting") %>%
+  group_by(drug_s) %>%
+  summarise(yoh = length(which(dose_yohimbine_mg_kg > 0)),
+            ati = length(which(dose_atipamezole_mg_kg > 0)),
+            n = n())
+pa
+```
+
+Tracking data - breakdown number of pigs per program and describe why they were discarded.
+
+```{r tracking data}
+track_df <- read.csv("input/tracking_summary.csv")
+
+n_start <- nrow(track_df)
+n_discarded <- length(which(track_df$kept == "N"))
+
+track_breakdown <- track_df %>%
+  filter(kept == "Y") %>%
+  group_by(treatment) %>%
+  summarise(n=n())
+track_breakdown
+```
+
+Ambient temperature range per program
+
+```{r ambient temp}
+x %>%
+  group_by(method) %>%
+  summarise(min_ambient = min(ambient_temp, na.rm=T),
+            max_ambient = max(ambient_temp, na.rm=T))
+```

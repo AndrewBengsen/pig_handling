@@ -51,11 +51,11 @@ The inconsistent time recording has been a bigger nightmare than I thought, but 
 ![Flow chart showing timed components for each method](background/capture_process.png)  
 Items labelled in green are recorded directly. Items labelled in white are inferred from items in green. Items labelled in grey are unavailable.  
 
+Originally, I ignored latent time for all treatments, but here I use latent time for manually restrained pigs as induction time.  
+
 {{< pagebreak >}}
 
 I can't calculate the real total time for drugged pigs because the latent period from arrival at the trap until drug administration wasn't recorded. Total duration can therefore only start when pigs are jabbed, darted or restrained. This means that for manual pigs, total time =  handling time.  
-
-From the ms: We quantified induction time (IT), recumbent time (RT), and total time (TT) (Hampton et al. 2016b). We measured IT as…., RT as the time from initial recumbency to the return to standing. There was no IT for pigs that were not chemically immobilised, and RT and TT were taken as the duration of the period for which the pig was restrained. We defined TT as the cumulative total duration of all procedures (Ponjoan et al. 2008), and was calculated as IT + RT.
 
 Both Pete and Darren have broken their durations down into handling and recovery, but Jordan hasn't.
 
@@ -71,64 +71,20 @@ s$rt <- ifelse(
   s$handling_min,
   rowSums(s[, c("handling_min", "recovery_min")], na.rm = TRUE)
 )
+
+# Assign IT = latent time (arrive at trap to pig restrained) for manual pigs
+s$induction_min[which(s$method == "Manual")] <- s$latent_min[which(s$method == "Manual")] 
+
 # Assign RT = handling time for manual pigs
 s$rt[which(s$method == "Manual")] <- s$handling_min[which(s$method == "Manual")]
 
-# Assign total time = induction + RT for drugged pigs
+# Assign total time = induction + RT for ALL pigs
 s$total_min <- s$induction_min + s$rt
-
-# Assign total time = handling time for manual pigs
-s$total_min[which(s$method == "Manual")] <- s$rt[which(s$method == "Manual")]
 
 # Greatest total time
 max.recovery <- as.numeric(s$recovery_min[which(s$total_min == max(s$total_min, na.rm = T))])
 ```
 
-## latent time for manually restrained pigs  
-
-```{r latent time for manual, include = T}
-
-mr <- filter(s, method == "Manual") %>%
-  mutate(method = "Manual (LT)")
-
-hist(mr$latent_min)
-range(mr$latent_min, na.rm=T)
-median(mr$latent_min, na.rm=T)
-table(mr$latent_min)
-
-surv.lt <- Surv(time = mr$latent_min, event = rep(1, nrow(mr)))
-
-# KM survival model 
-lt_mr <- survfit(surv.lt ~ 1, data=mr)
-lt_mr
-
-surv_median(lt_mr)
-
-hist(mr$latent_min)
-
-length(which(mr$latent_min > 30)) / nrow(mr)
-```
-
-
-```{r plot latent time for manual}
-lt_plot <- ggsurvplot(lt_mr, data=mr, conf.int = T, 
-                       palette = 1,
-                       legend = "none", 
-                      linetype = 2,
-                       ggtheme = theme_survminer(base_size = 9,
-                                     font.caption = c(9, "plain", "black"),
-                                     font.x = c(9, "plain", "black"),
-                                     font.tickslab = c(9, "plain", "black"),
-                                     font.y = c(9, "plain", "black")))  +
-  xlab("latent time (mins)") +
-  ylab("Proportion of pigs")
-
-(lt_plot2 <- lt_plot$plot +
-  scale_x_continuous(expand = c(0.01, 0)) +
-  scale_y_continuous(expand = c(0.01, 0))+
-  theme(plot.margin = unit(c(8,10,0,1), "pt")))
-
-```
 
 ## indcution time \~ capture method (pole, dart)
 
@@ -173,9 +129,6 @@ it_plot <- ggsurvplot(it1, data=s, conf.int = T,
   theme(plot.margin = unit(c(8,10,0,1), "pt")))
 
 ```
-
-
-
 
 ## handling time \~ capture method (manual, pole, dart)
 
@@ -278,27 +231,9 @@ ggplot(rt1.median) +
        caption = "Median recumbent time for pigs subjected to different capture methods") +
   theme_classic()
 
-s[which(s$rt == max(s$rt, na.rm=T)),]
-
-s %>%
-  group_by(method) %>%
-  summarise(n = n(),
-            min_rt = min(rt, na.rm=T),
-            max_rt = max(rt, na.rm=T),
-            n_over_60 = length(which(rt > 60))) %>%
-  mutate(p_over_60 = n_over_60 / n *100) %>%
-  knitr::kable(digits=0)
-
 ```
 
-What proportion of pigs took more than 1 hour to recover?  
-
-```{r}
-
-```
-
-
-## Total time \~ capture method  
+Total time \~ capture method  
 
 
 ```{r total time, include = T}
@@ -319,8 +254,8 @@ Total time was also shorter for pigs subjected to manual handling (median total 
 ```{r plot capture method TT}
 tt_plot <- ggsurvplot(tt1, data=s, conf.int = T, 
            palette = jama_palette3,
-           legend = "bottom", legend.title = "Program",
-           legend.labs = c("A (Dart)", "B (Pole\nsyringe)", "C (Manual\nrestraint)"),
+           legend = "bottom", legend.title = "Immobilisation\nmethod",
+           legend.labs = c("Dart", "Pole\nsyringe", "Manual"),
            ggtheme = theme_survminer(base_size = 9,
                                      font.caption = c(9, "plain", "black"),
                                      font.x = c(9, "plain", "black"),
@@ -366,87 +301,6 @@ ggsave("output/survival_plot_panel.png", all_plot, height = 15, width = 9, units
 
 ```{r save data}
 colnames(s[which(colnames(s) == "rt")]) <- "recumbent_min"
-write.csv(s, "output/revised_time-to-event_data.csv", row.names = F)
+write.csv(s, "output/revised_time-to-event_data_with_manual_IT.csv", row.names = F)
 ```
-
-
-Now include latent period for manually restrained pigs.
-
-
-```{r total time, include = T}
-# survival formula
-s_latent <- rbind(s, mr)
-s_latent$total_min[which(s_latent$method == "Manual (LT)")] <- s_latent$latent_min[which(s_latent$method == "Manual (LT)")] + s_latent$rt[which(s_latent$method == "Manual (LT)")]
-
-surv.ttL <- Surv(time = s_latent$total_min, event = rep(1, nrow(s_latent)))
-
-# KM survival model by method
-ttL <- survfit(surv.ttL ~ method, data=s_latent)
-ttL
-
-surv_median(ttL)
-
-```
-
-
-```{r plot capture method TTL}
-ttL_plot <- ggsurvplot(ttL, data=s_latent, conf.int = T, 
-                       palette = c(jama_palette3, 1),
-                       linetype = c(1,1,1,3),
-                       legend = "bottom", legend.title = "Program",
-                       legend.labs = c("A (Dart)", "B (Pole syringe)", "C (Manual restraint)", "C (Manual restraint\n with LT)"),
-                       ggtheme = theme_survminer(base_size = 9,
-                                                 font.caption = c(9, "plain", "black"),
-                                                 font.x = c(9, "plain", "black"),
-                                                 font.tickslab = c(9, "plain", "black"),
-                                                 font.y = c(9, "plain", "black"),
-                                                 font.legend = c(9, "plain", "black"))) +
-  xlab("Total time (mins)") +
-  ylab("Proportion of pigs")
-
-
-tt_plot3 <- ttL_plot$plot +
-  scale_x_continuous(limits = c(0,400), expand = c(0.01, 0)) +
-  scale_y_continuous(expand = c(0.01, 0)) +
-  theme(plot.margin = unit(c(1,10,1,1), "pt")) +
-    guides(colour = guide_legend(ncol = 2),
-           linetype = guide_legend(ncol = 2))
-
-tt_plot3
-```
-
-
-```{r plot all curves TTL}
-all_plotLT <- plot_grid(it_plot2, rt_plot2, tt_plot3, ncol=1,
-                      rel_heights = c(0.30, 0.30, 0.40), 
-                      labels = c("a)", "b)", "c)"), label_x = 0.9, label_size = 10)
-all_plotLT
-
-ggsave("output/survival_plot_panel_LT.png", all_plotLT, height = 15, width = 9, units = "cm")
-```
-
-
-What's the minimum TT for each method?
-
-```{r }
-s_latent %>%
-  group_by(method) %>%
-  summarise(min_tt = min(total_min, na.rm=T),
-            max_tt = max(total_min, na.rm=T))
-```
-
-
-Did long latent periods coincide with large numbers of pigs in traps? Which pigs had latent > 15 and did those same pigs also have lots of friends in the trap?
-
-```{r }
-long_latent <- s_latent$id[which(s_latent$latent_min > 30)]
-
-ll <- read.csv("input/working_pig_data_2025-05-30.csv") %>%
-  janitor::clean_names() %>%
-  filter(id %in% long_latent) %>%
-  select(id, n_in_trap)
-ll
-
-```
-
 

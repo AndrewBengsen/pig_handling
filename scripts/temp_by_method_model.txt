@@ -1,0 +1,26 @@
+model {
+  ## Priors for each method
+  for (m in 1:nmethod) {
+    alpha[m] ~ dnorm(0, 0.001)  # Intercept for method m
+    beta[m] ~ dnorm(0, 0.001)   # Slope for method m
+  }
+
+  ## Likelihood
+  for (i in 1:N) {
+    mu[i] <- alpha[method[i]] + beta[method[i]] * rt[i]
+    temp[i] ~ dnorm(mu[i], tau)
+  }
+
+  ## Precision and standard deviation
+  tau ~ dgamma(0.001, 0.001)
+  sigma <- 1 / sqrt(tau)
+
+
+ ## Predicted values across x = 5, 10, 15, ... 330 for each method
+ for (m in 1:nmethod) {
+    for (j in 1:60) {
+      xpred[j,m] <- alpha[m] + beta[m] * (j * 5)
+    }
+  }
+}
+
