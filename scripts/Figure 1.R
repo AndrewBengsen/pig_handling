@@ -11,7 +11,7 @@ jama_palette3 <- c("#00a1d5", "#df8f44", "black")
 
 theme_fig1 <- function () { 
   theme_bw(base_size = 9) +
-    theme(plot.margin = margin(1,1,1,1, unit="pt"),
+    theme(plot.margin = margin(1,1,20,1, unit="pt"),
           axis.title = element_blank(),
           axis.text = element_blank(),
           axis.ticks = element_blank(),
@@ -20,6 +20,7 @@ theme_fig1 <- function () {
           panel.grid.major = element_blank(),
           panel.grid.minor = element_blank())
 }
+
 #theme_set(theme_fig1())  
 theme_set(theme_classic())  
 #nsw_map <- ozmap_states %>%
@@ -28,7 +29,7 @@ theme_set(theme_classic())
 ozmap <- ozmap(x="states")
 
 sites <- st_read(dsn, "pig_clusters_4326") %>%
-  mutate(method = factor(method, labels = c("A", "B", "C")))
+  mutate(method = factor(method, labels = c("A (Dart)", "B (Pole\nsyringe)", "C (Manual\nrestraint)")))
 
 site_cents <- st_centroid(sites) 
 
@@ -50,6 +51,7 @@ bbox_df <- data.frame(xlim = c(bbox_oz[1], bbox_oz[1], bbox_oz[3],   bbox_oz[3])
     theme_void() +
     theme(legend.position = "bottom",
           legend.text = element_text(size=10),
-          legend.title = element_text(size=10)))
+          legend.title = element_text(size=10),
+          plot.margin = margin(1,1,5,1, unit="pt")))
 
-ggsave("output/Figure_1.png", FigMap, width = 9, height = 9, units = "cm")
+ggsave("output/Fig 1.pdf", FigMap, width = 9, height = 9, units = "cm")

@@ -370,6 +370,10 @@ ggplot(doc_post_long) +
         axis.line=element_line(),
         legend.key.size = unit(0.3, "cm")) 
 
+# Check out pigs that died during capture
+x[which(x$ud_0 == 1),]
+
+
 ```
     
 **Q3 Did Body temperature and hyperthermia risk differ among treatments?**
@@ -484,6 +488,12 @@ Were pigs that died within 14 days hyperthermic? None of the five pigs that died
 untimely_vars <- c("id", "method", "sex", "ambient_temp", "temp_body", "hyperthermic", "induction_min", "total_min", "doses", "dose_zoletil_mg_kg", "dose_xylazine_mg_kg")
 x[x$ud_14 == 1, untimely_vars]
 x[x$immediate_mortality == 1, untimely_vars]
+
+x %>%
+  group_by(method) %>%
+  summarise(mean_T = mean(temp_body, na.rm=T),
+            sd_T = sd(temp_body, na.rm=T),
+            n = n())
 ```
 
 
