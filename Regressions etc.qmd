@@ -80,6 +80,12 @@ s <- read.csv("output/revised_time-to-event_data.csv") %>%
 
 x <- left_join(s, x, by="id")
 
+# Finally, remove the five pigs that were shot after sedation
+not_euthanised <- c("PC012", "PC018", "PC019", "PC020", "PC021")
+
+x <- x %>%
+  filter(!(id %in% not_euthanised))
+
 ```
 
 
@@ -270,15 +276,16 @@ ggplot(ud14_post_long) +
 
 ```
     
-Only three pigs died within 14 days of capture. All died within 24 hours of release - two in Program B and one in Program C. The probability of a pig dying within 14 days of capture in Program B was `r pr_ud14_pole` (95% HPDI = `r hpdi_ud14_pole[1]`, `r hpdi_ud14_pole[2]`) and in Program c it was `r pr_ud14_manual` (95% HPDI = `r hpdi_ud14_manual[1]`, `r hpdi_ud14_manual[2]`).  
+Only three pigs died within 14 days post-release. All died within 24 hours of release - two in Program B and one in Program C. The probability of a pig dying within 14 days of capture in Program B was `r pr_ud14_pole` (95% HPDI = `r hpdi_ud14_pole[1]`, `r hpdi_ud14_pole[2]`) and in Program c it was `r pr_ud14_manual` (95% HPDI = `r hpdi_ud14_manual[1]`, `r hpdi_ud14_manual[2]`).  
 
-Next, estimate the probability of dying on the day of capture.  
+Next, estimate the probability of dying on the day of capture. Note that even though five pigs died during capture with darting, Stu advises that four of these (PC018-021) were euthanised after sedation because they weren't fit for collaring and couldn't be released alive, not because of any health issues. Hence only one pig (PC088) actually died due to health issues during handling. Adjust the `immediate_mortality` variable below to correct this.
 
 
 ```{r pr dead on capture binomial}
 x[x$immediate_mortality == 1, ]
 
 x_binom_doc <- x %>%
+  filter(!(is.na(immediate_mortality))) %>%
   group_by(method) %>%
   summarise(n = n(),
             doc = sum(immediate_mortality)) %>%
@@ -370,10 +377,6 @@ ggplot(doc_post_long) +
         axis.line=element_line(),
         legend.key.size = unit(0.3, "cm")) 
 
-# Check out pigs that died during capture
-x[which(x$ud_0 == 1),]
-
-
 ```
     
 **Q3 Did Body temperature and hyperthermia risk differ among treatments?**
@@ -439,7 +442,7 @@ hpdi_hyp_pole <- c(hyp_sum$sumTab$HPDIlower[hyp_sum$sumTab$Par == "bt_alpha[2]"]
 hpdi_hyp_dart <- c(hyp_sum$sumTab$HPDIlower[hyp_sum$sumTab$Par == "bt_alpha[3]"], hyp_sum$sumTab$HPDIupper[hyp_sum$sumTab$Par == "bt_alpha[3]"]) %>%
   round(2)
 
-pr_hyp_df<- hyp_sum$sumTab[c(4:6),]  %>%
+pr_hyp_df <- hyp_sum$sumTab[c(4:6),]  %>%
   select(Par, Mean, HPDIlower, HPDIupper) %>%
   mutate(Par = c("Manual", "Pole syringe", "Dart"))
 
@@ -637,11 +640,15 @@ x$shed14[which(x$collar_shed < 15)] <- 1
 ```
 
 
-Multiple darts - 17 darted pigs got two doses. We assume they were all in the arse except two wretched beasts that copped one in the abdomen or near the scrotum.
+Multiple darts - 15 darted pigs got two doses. We assume they were all in the arse except two wretched beasts that copped one in the abdomen or near the scrotum.
 
 ```{r Mutiple darts}
 table(x$doses)
 x[which(x$doses > 1), c(untimely_vars, "admin_loc2")]
+
+# How many darts per pig
+sum(x$doses[which(x$method == "Darting")], na.rm=T) / length(which(x$method == "Darting"))
+
 ```
 
 Estimate doses atipamezole and yohimbine doses for methods. The drug details don't actually seem to correspond to the correct individuals (manually restrained pigs have xylazine), but we can get averages.  
@@ -659,6 +666,8 @@ dose_tab <- x %>%
             mean_ati = mean(dose_atipamezole_mg_kg, na.rm=T))
 
 dose_tab
+
+
 ```
 
 Table 2
@@ -669,10 +678,6 @@ sem <- function(x) {
   se <- sd(x_clean) / sqrt(length(x_clean))
   return(se)
 }
-
-
-y <- rnorm(100, 20, 2)
-y[c(3,6,8,54)] <- NA
 
 table2 <- x %>%
   mutate(respiratory_rate = as.numeric(respiratory_rate)) %>%
@@ -708,16 +713,15 @@ z_real_overB <- round((z_real_B - z_intended_B) / z_intended_B, 2)*100
 ```
 
 
-How many pigs in Program A didn't get a reversal because they didn't need it?  
+How many pigs in Program A didn't get a reversal because they didn't need it (excluding the pig that died)?  
 
 ```{r no reversal}
-pa <- x %>%
+x %>%
   filter(method == "Darting") %>%
-  group_by(drug_s) %>%
-  summarise(yoh = length(which(dose_yohimbine_mg_kg > 0)),
-            ati = length(which(dose_atipamezole_mg_kg > 0)),
-            n = n())
-pa
+  summarise(n = n(),
+            n_ati = length(which(is.na(dose_atipamezole_mg_kg)==F)),
+            n_yoh = length(which(is.na(dose_yohimbine_mg_kg)==F)))%>%
+  mutate(n_no_reversal = n - n_ati - n_yoh - 1) # -1 for the pig that died
 ```
 
 Tracking data - breakdown number of pigs per program and describe why they were discarded.
