@@ -99,8 +99,6 @@ x <- x %>%
 ```
 
 
-
-
 The range of questions we can answer is limited by the lack of standardised measurements, e.g. no mass for manually restrained pigs. 
 
 Also, capture method and drugs are confounded
@@ -502,7 +500,7 @@ x %>%
 
 Any relationship between recumbency and hyperthermia?
 
-```{r hyperthermia x recumbency, eval=F}
+```{r hyperthermia x recumbency, eval=T}
 
 xrt <- x %>%
   filter(!(is.na(rt)))
@@ -651,7 +649,7 @@ sum(x$doses[which(x$method == "Darting")], na.rm=T) / length(which(x$method == "
 
 ```
 
-Estimate doses atipamezole and yohimbine doses for methods. The drug details don't actually seem to correspond to the correct individuals (manually restrained pigs have xylazine), but we can get averages.  
+Estimate atipamezole and yohimbine doses for methods. The drug details don't actually seem to correspond to the correct individuals (manually restrained pigs have xylazine), but we can get averages.  
 
 ```{r check mean doses reported in Table 1}
 cat(paste("mean zoletil dose =", round(mean(x$dose_zoletil_mg_kg, na.rm=T),2), "mg/kg"))
@@ -747,3 +745,102 @@ x %>%
   summarise(min_ambient = min(ambient_temp, na.rm=T),
             max_ambient = max(ambient_temp, na.rm=T))
 ```
+
+Any evidence for dose-dependency within TZ-only pigs, as per Reviewer 1's comment?  
+
+```{r TZ dose-dependency}
+tz <- x |>
+  filter(method == "Pole syringe") 
+
+ggplot(tz) +
+  geom_point(aes(x=dose_zoletil_mg_kg, y = rt))
+
+if(runmods == T){
+  cat(
+    "model {
+  ## Priors for each method
+
+    alpha~ dnorm(0, 0.001)  # Intercept for method m
+    beta ~ dnorm(0, 0.001)   # Slope for method m
+  
+
+  ## Likelihood
+  for (i in 1:N) {
+    mu[i] <- alpha + beta * dose[i]
+    rt[i] ~ dnorm(mu[i], tau)
+  }
+
+  ## Precision and standard deviation
+  tau ~ dgamma(0.001, 0.001)
+  sigma <- 1 / sqrt(tau)
+
+
+ ## Predicted values 
+    for (j in 1:10) {
+      xpred[j] <- alpha + beta * j
+  }
+}
+", fill=TRUE, file="Scripts/TZ-dose_rt_model.txt")
+  
+  tzdose_dat <- list(
+    dose = tz$dose_zoletil_mg_kg,
+    rt = tz$rt,
+    method = 1,
+    nmethod = 1,
+    N = nrow(tz))
+  
+  tz_dose <- run.jags(
+    method = "parallel",
+    model = "Scripts/TZ-dose_rt_model.txt",
+    monitor = hyp_rt_pars,
+    data = tzdose_dat,
+    sample = ni,
+    n.chains = nc,
+    adapt = nadapt,
+    burnin = nb,
+    summarise = F,
+    plots = F,
+    silent.jags = F
+  )
+  
+  tz_dose_list <- as.mcmc.list(tz_dose)
+  
+  saveRDS(tz_dose_list, "output/dose_x_rt.RDS") 
+} else {
+  hyp_rt_list <- readRDS("output/dose_x_rt.RDS")
+}
+
+tz_dose_sum <- mod_results_95(tz_dose_list)
+tz_dose_modmat <- tz_dose_sum$modMat  
+tz_dose_S <- tz_dose_sum$S
+
+plot_trace <- F
+if(plot_trace == T){
+  ta <- ggs_traceplot(tz_dose_S, family = "alpha")
+  da <- ggs_density(tz_dose_S, family = "beta") 
+}
+
+head(tz_dose_sum$sumTab)
+
+tz_dose_pred <- tz_dose_sum$sumTab |>
+  filter(Par != "alpha", Par != "beta") |>
+  mutate(dose = seq(1,10,1))
+
+ggplot(tz_dose_pred) + 
+  geom_ribbon(aes(x = dose, ymin = HPDIlower, ymax = HPDIupper), alpha = 0.3) +
+  geom_line(aes(x = dose, y = Mean)) +
+  geom_point(aes(x=dose_zoletil_mg_kg, y = rt), data=tz)
+
+
+```
+
+Did pigs that received TZX get a lower TZ dose than TZ-only pigs? 
+
+```{r TZ dose vs TZX}
+
+ggplot(xrt) +
+  geom_boxplot(aes(x = method, y = dose_zoletil_mg_kg))
+
+
+```
+

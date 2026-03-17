@@ -423,6 +423,7 @@ all_plotLT <- plot_grid(it_plot2, rt_plot2, tt_plot3, ncol=1,
 all_plotLT
 
 ggsave("output/survival_plot_panel_LT.png", all_plotLT, height = 15, width = 9, units = "cm")
+ggsave("output/Fig 4.pdf", all_plotLT, height = 15, width = 9, units = "cm")
 ```
 
 

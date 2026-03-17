@@ -108,13 +108,13 @@ surv_median(it1)
 
 ```
 
-As expected, there's no real difference in induction time between pole-jabbed and darted pigs.      
+As expected, there's no real difference in induction time between pole-jabbed and darted pigs. There's also no difference by sex within treatments (not shown here).       
 
 
 ```{r plot induction time by capture method}
 it_plot <- ggsurvplot(it1, data=s, conf.int = T, 
                        palette = jama_palette3,
-                       legend = "none", legend.title = "Capture method",
+                       legend = "right", legend.title = "Capture method",
                        ggtheme = theme_survminer(base_size = 9,
                                      font.caption = c(9, "plain", "black"),
                                      font.x = c(9, "plain", "black"),
@@ -150,6 +150,8 @@ surv_median(ht1)
 ```
 
 Handling time was clearly shorter for pigs subjected to manual handling (median handling time = `r surv_median(ht1)[3,2]` mins, n = `r ht1$n[3]`) than for pigs subjected to immobilisation via pole syringe (median handling time = `r surv_median(ht1)[2,2]`  mins, n = `r ht1$n[2]`), which was clearly shorter than pigs immobilised by darting (median handling time = `r surv_median(ht1)[1,2]` mins, n = `r ht1$n[1]`).    
+
+As with induction, there were no differences between sex within treatments (not shown here).  
 
 
 ```{r plot handling time by capture method}
@@ -199,7 +201,9 @@ surv_median(rt1)
 
 Recumbent time was shorter for pigs subjected to manual handling (median handling time = `r surv_median(rt1)[3,2]` mins, n = `r rt1$n[3]`) than for pigs subjected to immobilisation via pole syringe (median handling time = `r surv_median(rt1)[2,2]`  mins, n = `r rt1$n[2]`) or darting (median handling time = `r surv_median(rt1)[1,2]` mins, n = `r rt1$n[1]`). There's a big statistical outlier in the darted pigs due to one pig with a recovery duration of `r max.recovery` minutes, but this doesn't really impact the median.  
 
-Interestingly, the shorter handling time of pole syringe pigs relative to darted pigs falls away here, indicating longer recovery times for these animals.   
+Interestingly, the shorter handling time of pole syringe pigs relative to darted pigs falls away here, indicating longer recovery times for these animals.  
+
+Once again, no difference between sexes within treatments.  
 
 ```{r plot RT by capture method}
 rt_plot <- ggsurvplot(rt1, data=s, conf.int = T, 
@@ -294,6 +298,7 @@ all_plot <- plot_grid(it_plot2, rt_plot2, tt_plot2, ncol=1,
 all_plot
 
 ggsave("output/survival_plot_panel.png", all_plot, height = 15, width = 9, units = "cm")
+#ggsave("output/Fig 4.pdf", all_plot, height = 15, width = 9, units = "cm")
 ```
 
 

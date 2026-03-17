@@ -1,0 +1,24 @@
+model {
+  ## Priors for each method
+
+    alpha~ dnorm(0, 0.001)  # Intercept for method m
+    beta ~ dnorm(0, 0.001)   # Slope for method m
+  
+
+  ## Likelihood
+  for (i in 1:N) {
+    mu[i] <- alpha + beta * dose[i]
+    rt[i] ~ dnorm(mu[i], tau)
+  }
+
+  ## Precision and standard deviation
+  tau ~ dgamma(0.001, 0.001)
+  sigma <- 1 / sqrt(tau)
+
+
+ ## Predicted values 
+    for (j in 1:10) {
+      xpred[j] <- alpha + beta * j
+  }
+}
+
