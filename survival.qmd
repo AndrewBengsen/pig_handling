@@ -107,6 +107,7 @@ surv_median(lt_mr)
 hist(mr$latent_min)
 
 length(which(mr$latent_min > 30)) / nrow(mr)
+
 ```
 
 
@@ -450,4 +451,21 @@ ll
 
 ```
 
+
+```{r summary table}
+ 
+s |>
+  group_by(method) |>
+  summarise(lt_mean = mean(latent_min, na.rm=T),
+            lt_sd = sd(latent_min, na.rm=T),
+            it_mean = mean(induction_min, na.rm=T),
+            it_sd = sd(induction_min, na.rm=T),
+            rt_mean = mean(rt, na.rm=T),
+            rt_sd = sd(rt, na.rm=T),
+            tt_mean = mean(total_min, na.rm=T),
+            tt_sd = sd(total_min, na.rm=T),
+            tt_latent_mean = mean(total_min + latent_min, na.rm=T), 
+            tt_latent_sd = sd(total_min + latent_min, na.rm=T)) |>
+  knitr::kable()
+```
 

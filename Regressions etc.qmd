@@ -16,6 +16,10 @@ library(rjags); library(runjags)
 library(ggmcmc); library(ggpubr); library(knitr)
 source("scripts/Functions.R")
 
+sd_proportion <- function(p, n) {
+  sqrt(p * (1 - p) / n)
+}
+
 runmods <- F
 
 ```
@@ -56,7 +60,6 @@ x <- read.csv("input/working_pig_data_2025-05-30.csv", header = T) %>%
          -notes_on_collar_recovery, -notes_on_capture, -collar_data,
          -notes_on_recovery)
 
-
 # Join with SD's data on repeat doses for darted pigs
 repeats <- read.csv("input/repeat_doses.csv", header = T) 
 
@@ -94,7 +97,7 @@ x <- x %>%
   dplyr::select(date, id, method = capture_method, sex, ambient_temp, temp_body, hyperthermic, 
                 induction_min, rt, total_min, mass_kg, heart_rate, respiratory_rate,
                 drug_s, dose_zoletil_mg_kg, dose_xylazine_mg_kg, dose_yohimbine_mg_kg, dose_atipamezole_mg_kg,
-                mortality, death, capture_death = capture_n_adeath_duration, fate, doses, admin_loc2, collar_shed, n_in_trap) 
+                mortality, death, capture_death = capture_n_adeath_duration, fate, doses, admin_loc2, collar_shed, n_in_trap, injury) 
 
 ```
 
@@ -159,6 +162,16 @@ x$ud_0 <- x$immediate_mortality <- x$ud_14 <- 0
 x$ud_0[which(x$untimely == 1 & x$lifespan == 0)] <- 1
 x$ud_14[which(x$untimely == 1 & !(x$fate %in% c("dead_euthanased", "dead_handling")))] <- 1
 x$immediate_mortality[which(x$untimely == 1 & x$fate %in% c("dead_euthanased", "dead_handling"))] <- 1  
+
+x |>
+  group_by(method) |>
+  summarise(n = n(),
+            ud_imm = sum(immediate_mortality, na.rm = T),
+            ud14 = sum(ud_14, na.rm = T))
+
+sd_proportion(p = 1/114, n = 114)
+sd_proportion(p = 1/91, n = 91)
+sd_proportion(p = 2/155, 155)
 ```
 
 Probability of death from 1 to 14 days after capture.  
@@ -494,14 +507,21 @@ x %>%
   group_by(method) %>%
   summarise(mean_T = mean(temp_body, na.rm=T),
             sd_T = sd(temp_body, na.rm=T),
-            n = n())
+            hyperthermic_n = sum(hyperthermic, na.rm = T),
+            n = n()) |>
+  mutate(hyperthermic_p = hyperthermic_n / n) |>
+  mutate(hyper_p_sd = sd_proportion(hyperthermic_p, n))
+  
+
+sd_proportion(p = 16/91, n = 91)
+sd_proportion(p = 30/155, n = 155)
+sd_proportion(p = 16/91, n = 91)
 ```
 
 
 Any relationship between recumbency and hyperthermia?
 
 ```{r hyperthermia x recumbency, eval=T}
-
 xrt <- x %>%
   filter(!(is.na(rt)))
 
@@ -647,6 +667,8 @@ x[which(x$doses > 1), c(untimely_vars, "admin_loc2")]
 # How many darts per pig
 sum(x$doses[which(x$method == "Darting")], na.rm=T) / length(which(x$method == "Darting"))
 
+sd_proportion(p = 15/(94+15), n = 94+15)
+
 ```
 
 Estimate atipamezole and yohimbine doses for methods. The drug details don't actually seem to correspond to the correct individuals (manually restrained pigs have xylazine), but we can get averages.  
@@ -695,7 +717,7 @@ kable(table2, digits=2)
 
 How much higher than intended were X and TZ doses?
 
-```{r}
+```{r realised vs intended dose}
 x_intended <- 2
 z_intended_A <- 2
 z_intended_B <- 1
@@ -744,7 +766,143 @@ x %>%
   group_by(method) %>%
   summarise(min_ambient = min(ambient_temp, na.rm=T),
             max_ambient = max(ambient_temp, na.rm=T))
+
 ```
+
+AE asked if there was any relationship between ambient temp and duration of recumbency...
+
+```{r Ambient tempv v RT}
+xrta <- xrt |>
+  filter(is.na(ambient_temp) == F,
+         method != "Manual") |>
+  mutate(method = factor(method, levels = c("Darting", "Pole syringe")))
+
+ggplot(xrta) +
+  geom_point(aes(x = ambient_temp, y = rt)) +
+  facet_wrap(~method)
+
+ggplot(xrta, aes(x = dose_zoletil_mg_kg, y = rt)) +
+  geom_point() +
+  #geom_smooth() +
+  facet_wrap(~method)
+
+ggplot(xrta, aes(x = mass_kg, y = rt)) +
+  geom_point() +
+  #geom_smooth() +
+  facet_wrap(~method)
+
+ggplot(xrta) +
+  geom_point(aes(x = ambient_temp, y = temp_body)) +
+  facet_wrap(~method)
+
+if(runmods == T){
+ 
+    cat(
+    "model {
+  ## Priors for each method
+  for (m in 1:nmethod) {
+    alpha[m] ~ dnorm(0, 0.001)  # Intercept for method m
+    beta[m] ~ dnorm(0, 0.001)   # Slope for method m
+  }
+
+  ## Likelihood
+  for (i in 1:N) {
+    mu[i] <- alpha[method[i]] + beta[method[i]] * ambient[i]
+    rt[i] ~ dnorm(mu[i], tau)
+  }
+
+  ## Precision and standard deviation
+  tau ~ dgamma(0.001, 0.001)
+  sigma <- 1 / sqrt(tau)
+
+
+ ## Predicted values across x = 5, 10, 15, ... 45 for each method
+  for (m in 1:nmethod) {
+     for (j in 5:45) {
+       xpred[j,m] <- alpha[m] + beta[m] 
+     }
+   }
+}
+", fill=TRUE, file="Scripts/rt_by_ambient-temp_model.txt")
+
+  rt_x_ambient_dat <- list(
+    ambient = xrta$ambient_temp,
+    rt = xrta$rt,
+    method = as.numeric(xrta$method),
+    nmethod = 2,
+    N = nrow(xrta)
+  )
+  
+  rt_x_ambient <- run.jags(
+    method = "parallel",
+    model = "Scripts/rt_by_ambient-temp_model.txt",
+    monitor = hyp_rt_pars,
+    data = rt_x_ambient_dat,
+    sample = ni,
+    n.chains = nc,
+    adapt = nadapt,
+    burnin = nb,
+    summarise = F,
+    plots = F,
+    silent.jags = F
+  )
+  
+  rt_x_ambient <- as.mcmc.list(rt_x_ambient)
+  
+  saveRDS(rt_x_ambient, "output/rt_x_ambient.RDS") 
+} else {
+  rt_x_ambient <- readRDS("output/rt_x_ambient.RDS")
+}
+
+rt_x_ambient_sum <- mod_results_95(rt_x_ambient)
+rt_x_ambient_modmat <- rt_x_ambient$modMat  
+rt_x_ambient_S <- rt_x_ambient_sum$S
+
+plot_trace <- F
+if(plot_trace == T){
+  ta <- ggs_traceplot(rt_x_ambient_S, family = "alpha")
+  da <- ggs_density(rt_x_ambient_S, family = "beta") 
+}
+
+head(rt_x_ambient_sum$sumTab)
+
+# Intercepts
+rt_x_ambient_dart <- rt_x_ambient_sum$sumTab$Mean[rt_x_ambient_sum$sumTab$Par == "alpha[1]"] %>% round(2)
+rt_x_ambient_pole <- rt_x_ambient_sum$sumTab$Mean[rt_x_ambient_sum$sumTab$Par == "alpha[2]"] %>% round(2)
+
+hpdi_rt_x_ambient_pole <- c(rt_x_ambient_sum$sumTab$HPDIlower[rt_x_ambient_sum$sumTab$Par == "alpha[2]"], 
+                            rt_x_ambient_sum$sumTab$HPDIupper[rt_x_ambient_sum$sumTab$Par == "alpha[2]"]) %>%
+  round(2)
+hpdi_rt_x_ambient_dart <- c(rt_x_ambient_sum$sumTab$HPDIlower[rt_x_ambient_sum$sumTab$Par == "alpha[1]"], 
+                            rt_x_ambient_sum$sumTab$HPDIupper[rt_x_ambient_sum$sumTab$Par == "alpha[1]"]) %>%
+  round(2)
+
+# Slopes
+rt_x_ambient_dart_slope <- rt_x_ambient_sum$sumTab$Mean[rt_x_ambient_sum$sumTab$Par == "beta[1]"] %>% round(2)
+rt_x_ambient_pole_slope <- rt_x_ambient_sum$sumTab$Mean[rt_x_ambient_sum$sumTab$Par == "beta[2]"] %>% round(2)
+
+hpdi_rt_x_ambient_dart_slope <- c(rt_x_ambient_sum$sumTab$HPDIlower[rt_x_ambient_sum$sumTab$Par == "beta[1]"], 
+                            rt_x_ambient_sum$sumTab$HPDIupper[rt_x_ambient_sum$sumTab$Par == "beta[1]"]) %>%
+  round(2)
+hpdi_rt_x_ambient_pole_slope <- c(rt_x_ambient_sum$sumTab$HPDIlower[rt_x_ambient_sum$sumTab$Par == "beta[2]"], 
+                            rt_x_ambient_sum$sumTab$HPDIupper[rt_x_ambient_sum$sumTab$Par == "beta[2]"]) %>%
+  round(2)
+
+# Predicted
+sumTab_rt_x_ambient <- rt_x_ambient_sum$sumTab
+rt_x_ambient_pred <- sumTab_rt_x_ambient[-c(1:4),]
+rt_x_ambient_pred <- rt_x_ambient_pred |>
+  select(Par, Mean, HPDIlower, HPDIupper) |>
+  mutate(method = c(rep("Darting", 41), rep("Pole syringe", 41)),
+         x = rep(c(5:45), 2))
+
+ggplot(xrta) +
+  geom_point(aes(x = ambient_temp, y = rt)) +
+  geom_line(aes(x = x, y = Mean), data = rt_x_ambient_pred) +
+  geom_ribbon(aes(x = x, ymin = HPDIlower, ymax = HPDIupper), data = rt_x_ambient_pred, alpha = 0.2) +
+  facet_wrap(~method)
+```
+
 
 Any evidence for dose-dependency within TZ-only pigs, as per Reviewer 1's comment?  
 
@@ -807,7 +965,7 @@ if(runmods == T){
   
   saveRDS(tz_dose_list, "output/dose_x_rt.RDS") 
 } else {
-  hyp_rt_list <- readRDS("output/dose_x_rt.RDS")
+  tz_dose_list <- readRDS("output/dose_x_rt.RDS")
 }
 
 tz_dose_sum <- mod_results_95(tz_dose_list)
@@ -841,6 +999,59 @@ Did pigs that received TZX get a lower TZ dose than TZ-only pigs?
 ggplot(xrt) +
   geom_boxplot(aes(x = method, y = dose_zoletil_mg_kg))
 
+
+```
+
+Collar mass as a proportion of the mass of the smallest pig.
+
+```{r collar mass}
+collar_kg <- 1.1
+min_pig_kg <- min(x$mass_kg, na.rm = T)
+collar_kg / min_pig_kg
+
+```
+
+```{r new table for AE}
+x |> 
+  group_by(method) |>
+  summarise(n = n(),
+            ambient_temp = mean(ambient_temp, na.rm=T),
+            ambient_sd = sd(ambient_temp, na.rm=T),
+            body_temp = mean(temp_body, na.rm=T),
+            body_sd = sd(temp_body, na.rm=T),
+            heart = mean(heart_rate, na.rm=T),
+            heart_sd = sd(heart_rate, na.rm=T),
+            resp = mean(respiratory_rate, na.rm=T),
+            resp_sd = sd(respiratory_rate, na.rm=T),
+            mort0_n = sum(immediate_mortality, na.rm=T),
+            mort14_n = sum(untimely, na.rm=T) - sum(immediate_mortality, na.rm=T),
+            injury = mean(injury, na.rm=T), 
+            injury_sd = sd(injury, na.rm=T),
+            mass = mean(mass_kg, na.rm=T),
+            mass_sd = sd(mass_kg, na.rm=T))
+            
+
+manual <- x |>
+  filter(method == "Manual") 
+
+sd(manual$injury, na.rm=T)
+sd(manual, na.rm=T)
+sd(x$ambient_temp[which(x$method == "Darting")], na.rm=T)
+sd(x$ambient_temp[which(x$method == "Pole syringe")], na.rm=T)
+
+x |>
+  group_by(method) |>
+  summarise(TZ = mean(dose_zoletil_mg_kg, na.rm=T),
+            TZ_sd = sd(dose_zoletil_mg_kg, na.rm=T),
+            xyl = mean(dose_xylazine_mg_kg, na.rm=T),
+            xyl_sd = sd(dose_xylazine_mg_kg, na.rm=T),
+            ati = mean(dose_atipamezole_mg_kg, na.rm=T),
+            ati_sd = sd(dose_atipamezole_mg_kg, na.rm=T),
+            yoh = mean(dose_yohimbine_mg_kg, na.rm=T),
+            yoh_sd = sd(dose_yohimbine_mg_kg, na.rm=T))
+
+length(which(x$dose_atipamezole_mg_kg > 0))
+length(which(x$dose_yohimbine_mg_kg > 0))
 
 ```
 

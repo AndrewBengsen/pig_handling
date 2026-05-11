@@ -83,6 +83,7 @@ s$total_min <- s$induction_min + s$rt
 
 # Greatest total time
 max.recovery <- as.numeric(s$recovery_min[which(s$total_min == max(s$total_min, na.rm = T))])
+
 ```
 
 
